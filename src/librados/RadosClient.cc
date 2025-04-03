@@ -32,6 +32,7 @@
 #include "include/buffer.h"
 #include "include/stringify.h"
 #include "include/util.h"
+#include "log/Log.h"
 
 #include "msg/Messenger.h"
 
@@ -54,6 +55,7 @@ using std::ostringstream;
 using std::string;
 using std::map;
 using std::vector;
+using namespace std::literals;
 
 namespace bc = boost::container;
 namespace bs = boost::system;
@@ -92,22 +94,22 @@ int64_t librados::RadosClient::lookup_pool(const char *name)
 
 bool librados::RadosClient::pool_requires_alignment(int64_t pool_id)
 {
-  bool requires;
-  int r = pool_requires_alignment2(pool_id, &requires);
+  bool required;
+  int r = pool_requires_alignment2(pool_id, &required);
   if (r < 0) {
     // Cast answer to false, this is a little bit problematic
     // since we really don't know the answer yet, say.
     return false;
   }
 
-  return requires;
+  return required;
 }
 
 // a safer version of pool_requires_alignment
 int librados::RadosClient::pool_requires_alignment2(int64_t pool_id,
-						    bool *requires)
+						    bool *req)
 {
-  if (!requires)
+  if (!req)
     return -EINVAL;
 
   int r = wait_for_osdmap();
@@ -115,11 +117,11 @@ int librados::RadosClient::pool_requires_alignment2(int64_t pool_id,
     return r;
   }
 
-  return objecter->with_osdmap([requires, pool_id](const OSDMap& o) {
+  return objecter->with_osdmap([req, pool_id](const OSDMap& o) {
       if (!o.have_pg_pool(pool_id)) {
 	return -ENOENT;
       }
-      *requires = o.get_pg_pool(pool_id)->requires_aligned_append();
+      *req = o.get_pg_pool(pool_id)->requires_aligned_append();
       return 0;
     });
 }
@@ -283,7 +285,7 @@ int librados::RadosClient::connect()
     goto out;
   }
 
-  err = monclient.authenticate(conf->client_mount_timeout);
+  err = monclient.authenticate(std::chrono::duration<double>(conf.get_val<std::chrono::seconds>("client_mount_timeout")).count());
   if (err) {
     ldout(cct, 0) << conf->name << " authentication error " << cpp_strerror(-err) << dendl;
     shutdown();
@@ -631,16 +633,22 @@ int librados::RadosClient::get_pool_stats(std::list<string>& pools,
   return 0;
 }
 
-bool librados::RadosClient::get_pool_is_selfmanaged_snaps_mode(
+int librados::RadosClient::pool_is_in_selfmanaged_snaps_mode(
   const std::string& pool)
 {
-  bool ret = false;
-  objecter->with_osdmap([&](const OSDMap& osdmap) {
+  int r = wait_for_osdmap();
+  if (r < 0) {
+    return r;
+  }
+
+  return objecter->with_osdmap([&pool](const OSDMap& osdmap) {
       int64_t poolid = osdmap.lookup_pg_pool_name(pool);
-      if (poolid >= 0)
-	ret = osdmap.get_pg_pool(poolid)->is_unmanaged_snaps_mode();
+      if (poolid < 0) {
+        return -ENOENT;
+      }
+      return static_cast<int>(
+        osdmap.get_pg_pool(poolid)->is_unmanaged_snaps_mode());
     });
-  return ret;
 }
 
 int librados::RadosClient::get_fs_stats(ceph_statfs& stats)
@@ -1162,14 +1170,13 @@ int librados::RadosClient::get_inconsistent_pgs(int64_t pool_id,
   return 0;
 }
 
-const char** librados::RadosClient::get_tracked_conf_keys() const
+std::vector<std::string> librados::RadosClient::get_tracked_keys()
+    const noexcept
 {
-  static const char *config_keys[] = {
-    "librados_thread_count",
-    "rados_mon_op_timeout",
-    nullptr
+  return {
+    "librados_thread_count"s,
+    "rados_mon_op_timeout"s
   };
-  return config_keys;
 }
 
 void librados::RadosClient::handle_conf_change(const ConfigProxy& conf,

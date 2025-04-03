@@ -21,7 +21,6 @@
 #include "PyFormatter.h"
 
 #include "osdc/Objecter.h"
-#include "client/Client.h"
 #include "common/LogClient.h"
 #include "mon/MgrMap.h"
 #include "mon/MonCommand.h"
@@ -32,6 +31,10 @@
 #include "DaemonState.h"
 #include "ClusterState.h"
 #include "OSDPerfMetricTypes.h"
+
+#include <map>
+#include <set>
+#include <string>
 
 class health_check_map_t;
 class DaemonServer;
@@ -54,7 +57,6 @@ class ActivePyModules
   MonClient &monc;
   LogChannelRef clog, audit_clog;
   Objecter &objecter;
-  Client   &client;
   Finisher &finisher;
   TTLCache<std::string, PyObject*> ttl_cache;
 public:
@@ -73,7 +75,7 @@ public:
     std::map<std::string, std::string> store_data,
     bool mon_provides_kv_sub,
     DaemonStateIndex &ds, ClusterState &cs, MonClient &mc,
-    LogChannelRef clog_, LogChannelRef audit_clog_, Objecter &objecter_, Client &client_,
+    LogChannelRef clog_, LogChannelRef audit_clog_, Objecter &objecter_,
     Finisher &f, DaemonServer &server, PyModuleRegistry &pmr);
 
   ~ActivePyModules();
@@ -81,7 +83,6 @@ public:
   // FIXME: wrap for send_command?
   MonClient &get_monc() {return monc;}
   Objecter  &get_objecter() {return objecter;}
-  Client    &get_client() {return client;}
   PyObject *cacheable_get_python(const std::string &what);
   PyObject *get_python(const std::string &what);
   PyObject *get_server_python(const std::string &hostname);
@@ -124,6 +125,7 @@ public:
       const MDSPerfMetricQuery &query,
       const std::optional<MDSPerfMetricLimit> &limit);
   void remove_mds_perf_query(MetricQueryID query_id);
+  void reregister_mds_perf_queries();
   PyObject *get_mds_perf_counters(MetricQueryID query_id);
 
   bool get_store(const std::string &module_name,
@@ -157,7 +159,7 @@ public:
   void clear_all_progress_events();
   void get_progress_events(std::map<std::string,ProgressEvent>* events);
 
-  void register_client(std::string_view name, std::string addrs);
+  void register_client(std::string_view name, std::string addrs, bool replace);
   void unregister_client(std::string_view name, std::string addrs);
 
   void config_notify();
@@ -178,7 +180,7 @@ public:
   void update_kv_data(
     const std::string prefix,
     bool incremental,
-    const map<std::string, std::optional<bufferlist>, std::less<>>& data);
+    const std::map<std::string, std::optional<bufferlist>, std::less<>>& data);
   void _refresh_config_map();
 
   // Public so that MonCommandCompletion can use it
@@ -187,6 +189,10 @@ public:
   void notify_all(const std::string &notify_type,
                   const std::string &notify_id);
   void notify_all(const LogEntry &log_entry);
+
+  auto& get_module_finisher(const std::string &name) {
+    return modules.at(name)->finisher;
+  }
 
   bool is_pending(std::string_view name) const {
     return pending_modules.count(name) > 0;
@@ -211,7 +217,6 @@ public:
       std::string *err);
 
   int init();
-  void shutdown();
 
   void start_one(PyModuleRef py_module);
 
@@ -221,6 +226,7 @@ public:
 
   void cluster_log(const std::string &channel, clog_type prio,
     const std::string &message);
+  PyObject* get_daemon_health_metrics();
 
   bool inject_python_on() const;
   void update_cache_metrics();

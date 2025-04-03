@@ -49,6 +49,7 @@ void usage(ostream &out)
   out << "  skip <num>          skip <num> leading bytes before decoding\n";
   out << "  decode              decode into in-memory object\n";
   out << "  encode              encode in-memory object\n";
+  out << "  add_crc32c          calculate and encode crc32c for in-memory object\n";
   out << "  dump_json           dump in-memory object as json (to stdout)\n";
   out << "  hexdump             print encoded data in hex\n";
   out << "  get_struct_v        print version of the encoded object\n";
@@ -67,6 +68,8 @@ vector<DencoderPlugin> load_plugins()
   fs::path mod_dir{CEPH_DENC_MOD_DIR};
   if (auto ceph_lib = getenv("CEPH_LIB"); ceph_lib) {
     mod_dir = ceph_lib;
+  } else if (fs::is_regular_file("CMakeCache.txt")) {
+    mod_dir = std::filesystem::canonical("lib");
   }
   if (!fs::is_directory(mod_dir)) {
     std::cerr << "unable to load dencoders from "
@@ -161,6 +164,16 @@ int main(int argc, const char **argv)
 	return 1;
       }
       den->encode(encbl, features | CEPH_FEATURE_RESERVED); // hack for OSDMap
+    } else if (*i == string("add_crc32c")) {
+      if (!encbl.length()) {
+	cerr << "must first encode something" << std::endl;
+	return 1;
+      }
+      auto p = encbl.begin();
+      ceph_assert(skip < encbl.length());
+      p += skip;
+      __u32 crc = p.crc32c(encbl.length() - skip, 0);
+      encode(crc, encbl);
     } else if (*i == string("decode")) {
       if (!den) {
 	cerr << "must first select type with 'type <name>'" << std::endl;
@@ -261,6 +274,12 @@ int main(int argc, const char **argv)
 	return 0;
       else
 	return 1;
+    } else if (*i == string("stray_okay")) {
+      if (!den) {
+	cerr << "must first select type with 'type <name>'" << std::endl;
+	return 1;
+      }
+      den->set_stray_okay();
     } else {
       cerr << "unknown option '" << *i << "'" << std::endl;
       return 1;

@@ -2,9 +2,10 @@
 
 from functools import wraps
 
+from .. import mgr
 from ..exceptions import DashboardException
 from ..services.orchestrator import OrchClient
-from . import APIDoc, APIRouter, Endpoint, EndpointDoc, ReadPermission, RESTController
+from . import APIDoc, Endpoint, EndpointDoc, ReadPermission, RESTController, UIRouter
 
 STATUS_SCHEMA = {
     "available": (bool, "Orchestrator status"),
@@ -35,7 +36,7 @@ def raise_if_no_orchestrator(features=None):
     return inner
 
 
-@APIRouter('/orchestrator')
+@UIRouter('/orchestrator')
 @APIDoc("Orchestrator Management API", "Orchestrator")
 class Orchestrator(RESTController):
 
@@ -45,3 +46,7 @@ class Orchestrator(RESTController):
                  responses={200: STATUS_SCHEMA})
     def status(self):
         return OrchClient.instance().status()
+
+    @Endpoint()
+    def get_name(self):
+        return mgr.get_module_option_ex('orchestrator', 'orchestrator')

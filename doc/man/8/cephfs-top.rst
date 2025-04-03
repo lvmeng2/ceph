@@ -36,24 +36,28 @@ Options
 
    Perform a selftest. This mode performs a sanity check of ``stats`` module.
 
+.. option:: --conffile [CONFFILE]
+
+   Path to cluster configuration file
+
+.. option:: -d [DELAY], --delay [DELAY]
+
+   Refresh interval in seconds (default: 1)
+
+.. option:: --dump
+
+   Dump the metrics to stdout
+
+.. option:: --dumpfs <fs_name>
+
+   Dump the metrics of the given filesystem to stdout
+
 Descriptions of fields
 ======================
 
 .. describe:: chit
 
    cap hit rate
-
-.. describe:: rlat
-
-   read latency
-
-.. describe:: wlat
-
-   write latency
-
-.. describe:: mlat
-
-   metadata latency
 
 .. describe:: dlease
 
@@ -95,6 +99,29 @@ Descriptions of fields
 
    speed of write IOs compared with the last refresh
 
+.. describe:: rlatavg
+
+   average read latency
+
+.. describe:: rlatsd
+
+   standard deviation (variance) for read latency
+
+.. describe:: wlatavg
+
+   average write latency
+
+.. describe:: wlatsd
+
+   standard deviation (variance) for write latency
+
+.. describe:: mlatavg
+
+   average metadata latency
+
+.. describe:: mlatsd
+
+   standard deviation (variance) for metadata latency
 
 Availability
 ============

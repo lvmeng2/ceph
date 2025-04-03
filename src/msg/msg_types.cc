@@ -8,6 +8,8 @@
 #include <string.h>
 #include <netdb.h>
 
+#include <fmt/format.h>
+
 #include "common/Formatter.h"
 
 bool entity_name_t::parse(std::string_view s)
@@ -227,6 +229,21 @@ std::ostream& operator<<(std::ostream& out, const entity_addr_t &addr)
   return out;
 }
 
+std::string entity_addr_t::fmt_print() const
+{
+  if (type == entity_addr_t::TYPE_NONE) {
+    return "-";
+  }
+  std::ostringstream out;  //< \todo use fmt::format
+  out << get_sockaddr();
+
+  if (type == entity_addr_t::TYPE_ANY) {
+    return fmt::format("{}/{}", out.str(), nonce);
+  } else {
+    return fmt::format("{}:{}/{}", get_type_name(type), out.str(), nonce);
+  }
+}
+
 std::ostream& operator<<(std::ostream& out, const sockaddr *psa)
 {
   char buf[NI_MAXHOST] = { 0 };
@@ -409,4 +426,13 @@ std::string entity_addr_t::ip_only_to_str() const
     break;
   }
   return host_ip ? host_ip : "";
+}
+
+std::string entity_addr_t::ip_n_port_to_str() const
+{
+  if (is_ipv6()) {
+    return fmt::format("[{}]:{}", ip_only_to_str(), get_port());
+  } else {
+    return fmt::format("{}:{}", ip_only_to_str(), get_port());
+  }
 }

@@ -16,8 +16,7 @@
 #define CEPH_MDS_SESSIONMAP_H
 
 #include <set>
-
-#include "include/unordered_map.h"
+#include <unordered_map>
 
 #include "include/Context.h"
 #include "include/xlist.h"
@@ -45,6 +44,7 @@ enum {
   l_mdssm_total_load,
   l_mdssm_avg_load,
   l_mdssm_avg_session_uptime,
+  l_mdssm_metadata_threshold_sessions_evicted,
   l_mdssm_last,
 };
 
@@ -313,6 +313,7 @@ public:
   bool trim_completed_requests(ceph_tid_t mintid) {
     // trim
     bool erased_any = false;
+    last_trim_completed_requests_tid = mintid;
     while (!info.completed_requests.empty() && 
 	   (mintid == 0 || info.completed_requests.begin()->first < mintid)) {
       info.completed_requests.erase(info.completed_requests.begin());
@@ -338,6 +339,7 @@ public:
   }
   bool trim_completed_flushes(ceph_tid_t mintid) {
     bool erased_any = false;
+    last_trim_completed_flushes_tid = mintid;
     while (!info.completed_flushes.empty() &&
 	(mintid == 0 || *info.completed_flushes.begin() < mintid)) {
       info.completed_flushes.erase(info.completed_flushes.begin());
@@ -413,6 +415,10 @@ public:
   Session *reclaiming_from = nullptr;
   session_info_t info;                         ///< durable bits
   MDSAuthCaps auth_caps;
+
+  // True if the session is opened by the client.
+  // False if the session is forced to open, until it is opened again by the client.
+  bool client_opened = false;
 
   xlist<Session*>::item item_session_list;
 
@@ -492,6 +498,9 @@ private:
 
   unsigned num_trim_flushes_warnings = 0;
   unsigned num_trim_requests_warnings = 0;
+
+  ceph_tid_t last_trim_completed_requests_tid = 0;
+  ceph_tid_t last_trim_completed_flushes_tid = 0;
 };
 
 class SessionFilter
@@ -568,7 +577,6 @@ public:
   }
 
   static void generate_test_instances(std::list<SessionMapStore*>& ls);
-
   void reset_state()
   {
     session_map.clear();
@@ -578,7 +586,7 @@ public:
 
 protected:
   version_t version = 0;
-  ceph::unordered_map<entity_name_t, Session*> session_map;
+  std::unordered_map<entity_name_t, Session*> session_map;
   PerfCounters *logger =nullptr;
 
   // total request load avg
@@ -589,7 +597,7 @@ protected:
 class SessionMap : public SessionMapStore {
 public:
   SessionMap() = delete;
-  explicit SessionMap(MDSRank *m) : mds(m) {}
+  explicit SessionMap(MDSRank *m);
 
   ~SessionMap() override
   {
@@ -664,7 +672,7 @@ public:
 	    session_map_entry-> second : nullptr);
   }
   const Session* get_session(entity_name_t w) const {
-    ceph::unordered_map<entity_name_t, Session*>::const_iterator p = session_map.find(w);
+    auto p = session_map.find(w);
     if (p == session_map.end()) {
       return NULL;
     } else {
@@ -675,6 +683,16 @@ public:
   void add_session(Session *s);
   void remove_session(Session *s);
   void touch_session(Session *session);
+
+  void add_to_broken_root_squash_clients(Session* s) {
+    broken_root_squash_clients.insert(s);
+  }
+  uint64_t num_broken_root_squash_clients() const {
+    return broken_root_squash_clients.size();
+  }
+  auto const& get_broken_root_squash_clients() const {
+    return broken_root_squash_clients;
+  }
 
   Session *get_oldest_session(int state) {
     auto by_state_entry = by_state.find(state);
@@ -838,6 +856,13 @@ private:
   }
 
   time avg_birth_time = clock::zero();
+
+  size_t mds_session_metadata_threshold;
+
+  bool validate_and_encode_session(MDSRank *mds, Session *session, bufferlist& bl);
+  void apply_blocklist(const std::set<entity_name_t>& victims);
+
+  std::set<Session*> broken_root_squash_clients;
 };
 
 std::ostream& operator<<(std::ostream &out, const Session &s);

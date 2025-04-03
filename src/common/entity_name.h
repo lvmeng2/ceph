@@ -41,7 +41,8 @@ struct EntityName
     decode(id_, bl);
     set(type_, id_);
   }
-
+  void dump(ceph::Formatter *f) const;
+  static void generate_test_instances(std::list<EntityName*>& ls);
   const std::string& to_str() const;
   const char *to_cstr() const;
   bool from_str(std::string_view s);
@@ -70,8 +71,10 @@ struct EntityName
 
   friend bool operator<(const EntityName& a, const EntityName& b);
   friend std::ostream& operator<<(std::ostream& out, const EntityName& n);
-  friend bool operator==(const EntityName& a, const EntityName& b);
-  friend bool operator!=(const EntityName& a, const EntityName& b);
+
+  bool operator==(const EntityName& rhs) const noexcept {
+    return type == rhs.type && id == rhs.id;
+  }
 
 private:
   struct str_to_entity_type_t {
@@ -86,7 +89,5 @@ private:
 };
 
 WRITE_CLASS_ENCODER(EntityName)
-
-WRITE_EQ_OPERATORS_2(EntityName, type, id)
 
 #endif

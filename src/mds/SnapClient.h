@@ -15,12 +15,14 @@
 #ifndef CEPH_SNAPCLIENT_H
 #define CEPH_SNAPCLIENT_H
 
+#include <map>
+#include <set>
 #include <string_view>
 
 #include "MDSTableClient.h"
 #include "snap.h"
-#include "MDSContext.h"
 
+class MDSContext;
 class MDSRank;
 class LogSegment;
 
@@ -87,6 +89,7 @@ public:
 
   snapid_t get_last_created() const { return cached_last_created; }
   snapid_t get_last_destroyed() const { return cached_last_destroyed; }
+  snapid_t get_last_seq() const { return std::max(cached_last_destroyed, cached_last_created); }
 
   void get_snaps(std::set<snapid_t>& snaps) const;
   std::set<snapid_t> filter(const std::set<snapid_t>& snaps) const;

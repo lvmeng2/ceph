@@ -3,6 +3,7 @@
 
 #include "rgw_common.h"
 #include "rgw_rest_client.h"
+#include "rgw_acl_s3.h"
 #include "rgw_auth_s3.h"
 #include "rgw_http_errors.h"
 
@@ -189,7 +190,7 @@ void RGWHTTPSimpleRequest::get_out_headers(map<string, string> *pheaders)
   out_headers.clear();
 }
 
-static int sign_request_v2(const DoutPrefixProvider *dpp, RGWAccessKey& key,
+static int sign_request_v2(const DoutPrefixProvider *dpp, const RGWAccessKey& key,
                         const string& region, const string& service,
                         RGWEnv& env, req_info& info,
                         const bufferlist *opt_content)
@@ -208,7 +209,7 @@ static int sign_request_v2(const DoutPrefixProvider *dpp, RGWAccessKey& key,
   }
 
   string canonical_header;
-  if (!rgw_create_s3_canonical_header(dpp, info, NULL, canonical_header, false)) {
+  if (!rgw_create_s3_canonical_header(dpp, RGW_OP_UNKNOWN, info, NULL, canonical_header, false)) {
     ldpp_dout(dpp, 0) << "failed to create canonical s3 header" << dendl;
     return -EINVAL;
   }
@@ -230,7 +231,7 @@ static int sign_request_v2(const DoutPrefixProvider *dpp, RGWAccessKey& key,
   return 0;
 }
 
-static int sign_request_v4(const DoutPrefixProvider *dpp, RGWAccessKey& key,
+static int sign_request_v4(const DoutPrefixProvider *dpp, const RGWAccessKey& key,
                            const string& region, const string& service,
                            RGWEnv& env, req_info& info,
                            const bufferlist *opt_content)
@@ -248,7 +249,12 @@ static int sign_request_v4(const DoutPrefixProvider *dpp, RGWAccessKey& key,
     }
   }
 
-  auto sigv4_data = rgw::auth::s3::AWSSignerV4::prepare(dpp, key.id, region, service, info, opt_content, true);
+  rgw::auth::s3::AWSSignerV4::prepare_result_t sigv4_data;
+  if (service == "s3") {
+    sigv4_data = rgw::auth::s3::AWSSignerV4::prepare(dpp, key.id, region, service, info, opt_content, true);
+  } else {
+    sigv4_data = rgw::auth::s3::AWSSignerV4::prepare(dpp, key.id, region, service, info, opt_content, false);
+  }
   auto sigv4_headers = sigv4_data.signature_factory(dpp, key.key, sigv4_data);
 
   for (auto& entry : sigv4_headers) {
@@ -259,7 +265,7 @@ static int sign_request_v4(const DoutPrefixProvider *dpp, RGWAccessKey& key,
   return 0;
 }
 
-static int sign_request(const DoutPrefixProvider *dpp, RGWAccessKey& key,
+static int sign_request(const DoutPrefixProvider *dpp, const RGWAccessKey& key,
                         const string& region, const string& service,
                         RGWEnv& env, req_info& info,
                         const bufferlist *opt_content)
@@ -289,7 +295,7 @@ static bool identify_scope(const DoutPrefixProvider *dpp,
                            CephContext *cct,
                            const string& host,
                            string *region,
-                           string *service)
+                           string& service)
 {
   if (!boost::algorithm::ends_with(host, "amazonaws.com")) {
     ldpp_dout(dpp, 20) << "NOTICE: cannot identify region for connection to: " << host << dendl;
@@ -300,14 +306,18 @@ static bool identify_scope(const DoutPrefixProvider *dpp,
 
   get_str_vec(host, ".", vec);
 
-  *service = "s3"; /* default */
+  string ser = service;
+  if (service.empty()) {
+    service = "s3"; /* default */
+  }
 
   for (auto iter = vec.begin(); iter != vec.end(); ++iter) {
     auto& s = *iter;
     if (s == "s3" ||
-        s == "execute-api") {
+        s == "execute-api" ||
+        s == "iam") {
       if (s == "execute-api") {
-        *service = s;
+        service = s;
       }
       ++iter;
       if (iter == vec.end()) {
@@ -335,22 +345,26 @@ static void scope_from_api_name(const DoutPrefixProvider *dpp,
                                 const string& host,
                                 std::optional<string> api_name,
                                 string *region,
-                                string *service)
+                                string& service)
 {
-  if (api_name) {
+  if (api_name && service.empty()) {
     *region = *api_name;
-    *service = "s3";
+    service = "s3";
     return;
   }
 
   if (!identify_scope(dpp, cct, host, region, service)) {
-    *region = cct->_conf->rgw_zonegroup;
-    *service = "s3";
+    if (service == "iam") {
+      *region = cct->_conf->rgw_zonegroup;
+    } else {
+      *region = cct->_conf->rgw_zonegroup;
+      service = "s3";
+    }
     return;
   }
 }
 
-int RGWRESTSimpleRequest::forward_request(const DoutPrefixProvider *dpp, RGWAccessKey& key, req_info& info, size_t max_response, bufferlist *inbl, bufferlist *outbl, optional_yield y)
+int RGWRESTSimpleRequest::forward_request(const DoutPrefixProvider *dpp, const RGWAccessKey& key, const req_info& info, size_t max_response, bufferlist *inbl, bufferlist *outbl, optional_yield y, std::string service)
 {
 
   string date_str;
@@ -381,19 +395,26 @@ int RGWRESTSimpleRequest::forward_request(const DoutPrefixProvider *dpp, RGWAcce
   }
 
   string region;
-  string service;
+  string s;
+  if (!service.empty()) {
+    s = service;
+  }
 
-  scope_from_api_name(dpp, cct, host, api_name, &region, &service);
+  scope_from_api_name(dpp, cct, host, api_name, &region, s);
 
   const char *maybe_payload_hash = info.env->get("HTTP_X_AMZ_CONTENT_SHA256");
-  if (maybe_payload_hash) {
+  if (maybe_payload_hash && s != "iam") {
     new_env.set("HTTP_X_AMZ_CONTENT_SHA256", maybe_payload_hash);
   }
 
-  int ret = sign_request(dpp, key, region, service, new_env, new_info, nullptr);
+  int ret = sign_request(dpp, key, region, s, new_env, new_info, nullptr);
   if (ret < 0) {
     ldpp_dout(dpp, 0) << "ERROR: failed to sign request" << dendl;
     return ret;
+  }
+
+  if (s == "iam") {
+    new_info.args.remove("PayloadHash");
   }
 
   for (const auto& kv: new_env.get_map()) {
@@ -406,7 +427,7 @@ int RGWRESTSimpleRequest::forward_request(const DoutPrefixProvider *dpp, RGWAcce
   }
 
   string params_str;
-  get_params_str(info.args.get_params(), params_str);
+  get_params_str(new_info.args.get_params(), params_str);
 
   string new_url = url;
   string& resource = new_info.request_uri;
@@ -431,7 +452,7 @@ int RGWRESTSimpleRequest::forward_request(const DoutPrefixProvider *dpp, RGWAcce
   method = new_info.method;
   url = new_url;
 
-  int r = process(y);
+  int r = process(dpp, y);
   if (r < 0){
     if (r == -EINVAL){
       // curl_easy has errored, generally means the service is not available
@@ -477,28 +498,22 @@ RGWRESTStreamS3PutObj::~RGWRESTStreamS3PutObj()
   delete out_cb;
 }
 
-static void grants_by_type_add_one_grant(map<int, string>& grants_by_type, int perm, ACLGrant& grant)
+static void grants_by_type_add_one_grant(map<int, string>& grants_by_type, int perm, const ACLGrant& grant)
 {
   string& s = grants_by_type[perm];
 
   if (!s.empty())
     s.append(", ");
 
-  string id_type_str;
-  ACLGranteeType& type = grant.get_type();
-  switch (type.get_type()) {
-    case ACL_TYPE_GROUP:
-      id_type_str = "uri";
-      break;
-    case ACL_TYPE_EMAIL_USER:
-      id_type_str = "emailAddress";
-      break;
-    default:
-      id_type_str = "id";
+  if (const auto user = grant.get_user(); user) {
+    s.append("id=\"" + to_string(user->id) + "\"");
+  } else if (const auto email = grant.get_email(); email) {
+    s.append("emailAddress=\"" + email->address + "\"");
+  } else if (const auto group = grant.get_group(); group) {
+    std::string uri;
+    rgw::s3::acl_group_to_uri(group->type, uri);
+    s.append("uri=\"" + uri + "\"");
   }
-  rgw_user id;
-  grant.get_id(id);
-  s.append(id_type_str + "=\"" + id.to_str() + "\"");
 }
 
 struct grant_type_to_header {
@@ -515,7 +530,7 @@ struct grant_type_to_header grants_headers_def[] = {
   { 0, NULL}
 };
 
-static bool grants_by_type_check_perm(map<int, string>& grants_by_type, int perm, ACLGrant& grant, int check_perm)
+static bool grants_by_type_check_perm(map<int, string>& grants_by_type, int perm, const ACLGrant& grant, int check_perm)
 {
   if ((perm & check_perm) == check_perm) {
     grants_by_type_add_one_grant(grants_by_type, check_perm, grant);
@@ -524,7 +539,7 @@ static bool grants_by_type_check_perm(map<int, string>& grants_by_type, int perm
   return false;
 }
 
-static void grants_by_type_add_perm(map<int, string>& grants_by_type, int perm, ACLGrant& grant)
+static void grants_by_type_add_perm(map<int, string>& grants_by_type, int perm, const ACLGrant& grant)
 {
   struct grant_type_to_header *t;
 
@@ -559,7 +574,7 @@ void RGWRESTGenerateHTTPHeaders::init(const string& _method, const string& host,
                                       const string& resource, const param_vec_t& params,
                                       std::optional<string> api_name)
 {
-  scope_from_api_name(this, cct, host, api_name, &region, &service);
+  scope_from_api_name(this, cct, host, api_name, &region, service);
 
   string params_str;
   map<string, string>& args = new_info->args.get_params();
@@ -649,16 +664,13 @@ void RGWRESTGenerateHTTPHeaders::set_http_attrs(const map<string, string>& http_
   }
 }
 
-void RGWRESTGenerateHTTPHeaders::set_policy(RGWAccessControlPolicy& policy)
+void RGWRESTGenerateHTTPHeaders::set_policy(const RGWAccessControlPolicy& policy)
 {
   /* update acl headers */
-  RGWAccessControlList& acl = policy.get_acl();
-  multimap<string, ACLGrant>& grant_map = acl.get_grant_map();
-  multimap<string, ACLGrant>::iterator giter;
+  const RGWAccessControlList& acl = policy.get_acl();
   map<int, string> grants_by_type;
-  for (giter = grant_map.begin(); giter != grant_map.end(); ++giter) {
-    ACLGrant& grant = giter->second;
-    ACLPermission& perm = grant.get_permission();
+  for (const auto& [id, grant] : acl.get_grant_map()) {
+    ACLPermission perm = grant.get_permission();
     grants_by_type_add_perm(grants_by_type, perm.get_permissions(), grant);
   }
   add_grants_headers(grants_by_type, *new_env, new_info->x_meta_map);
@@ -675,22 +687,22 @@ int RGWRESTGenerateHTTPHeaders::sign(const DoutPrefixProvider *dpp, RGWAccessKey
   return 0;
 }
 
-void RGWRESTStreamS3PutObj::send_init(rgw::sal::Object* obj)
+void RGWRESTStreamS3PutObj::send_init(const rgw_obj& obj)
 {
   string resource_str;
   string resource;
   string new_url = url;
   string new_host = host;
 
-   const auto& bucket_name = obj->get_bucket()->get_name();
+   const auto& bucket_name = obj.bucket.name;
 
   if (host_style == VirtualStyle) {
-    resource_str = obj->get_oid();
+    resource_str = obj.get_oid();
 
     new_url = bucket_name + "."  + new_url;
     new_host = bucket_name + "." + new_host;
   } else {
-    resource_str = bucket_name + "/" + obj->get_oid();
+    resource_str = bucket_name + "/" + obj.get_oid();
   }
 
   //do not encode slash in object key name
@@ -732,7 +744,7 @@ void RGWRESTStreamS3PutObj::send_ready(const DoutPrefixProvider *dpp, RGWAccessK
   out_cb = new RGWRESTStreamOutCB(this);
 }
 
-void RGWRESTStreamS3PutObj::put_obj_init(const DoutPrefixProvider *dpp, RGWAccessKey& key, rgw::sal::Object* obj, map<string, bufferlist>& attrs)
+void RGWRESTStreamS3PutObj::put_obj_init(const DoutPrefixProvider *dpp, RGWAccessKey& key, const rgw_obj& obj, map<string, bufferlist>& attrs)
 {
   send_init(obj);
   send_ready(dpp, key, attrs);
@@ -783,7 +795,8 @@ static void send_prepare_convert(const rgw_obj& obj, string *resource)
 {
   string urlsafe_bucket, urlsafe_object;
   url_encode(obj.bucket.get_key(':', 0), urlsafe_bucket);
-  url_encode(obj.key.name, urlsafe_object);
+  // do not encode slash. It leads to 404 errors when fetching objects inside folders.
+  url_encode(obj.key.name, urlsafe_object, false);
   *resource = urlsafe_bucket + "/" + urlsafe_object;
 }
 
@@ -906,25 +919,18 @@ int RGWRESTStreamRWRequest::send(RGWHTTPManager *mgr)
     headers.emplace_back(kv);
   }
 
-  if (!mgr) {
-    return RGWHTTP::send(this);
-  }
-
-  int r = mgr->add_request(this);
-  if (r < 0)
-    return r;
-
-  return 0;
+  return RGWHTTPStreamRWRequest::send(mgr);
 }
 
-int RGWHTTPStreamRWRequest::complete_request(optional_yield y,
+int RGWHTTPStreamRWRequest::complete_request(const DoutPrefixProvider* dpp,
+                                             optional_yield y,
                                              string *etag,
                                              real_time *mtime,
                                              uint64_t *psize,
                                              map<string, string> *pattrs,
                                              map<string, string> *pheaders)
 {
-  int ret = wait(y);
+  int ret = wait(dpp, y);
   if (ret < 0) {
     return ret;
   }
@@ -1096,4 +1102,17 @@ int RGWHTTPStreamRWRequest::send_data(void *ptr, size_t len, bool *pause)
     write_drain_cb->notify(out_len);
   }
   return send_size;
+}
+
+int RGWHTTPStreamRWRequest::send(RGWHTTPManager *mgr)
+{
+  if (!mgr) {
+    return RGWHTTP::send(this);
+  }
+
+  int r = mgr->add_request(this);
+  if (r < 0)
+    return r;
+
+  return 0;
 }

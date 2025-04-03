@@ -1,3 +1,4 @@
+import { HttpHeaders } from '@angular/common/http';
 import { HttpClientTestingModule } from '@angular/common/http/testing';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { BrowserAnimationsModule } from '@angular/platform-browser/animations';
@@ -8,9 +9,7 @@ import { ToastrModule } from 'ngx-toastr';
 import { BehaviorSubject, of } from 'rxjs';
 
 import { RbdService } from '~/app/shared/api/rbd.service';
-import { TableStatusViewCache } from '~/app/shared/classes/table-status-view-cache';
 import { TableActionsComponent } from '~/app/shared/datatable/table-actions/table-actions.component';
-import { ViewCacheStatus } from '~/app/shared/enum/view-cache-status.enum';
 import { ExecutingTask } from '~/app/shared/models/executing-task';
 import { SummaryService } from '~/app/shared/services/summary.service';
 import { TaskListService } from '~/app/shared/services/task-list.service';
@@ -28,6 +27,7 @@ describe('RbdListComponent', () => {
   let component: RbdListComponent;
   let summaryService: SummaryService;
   let rbdService: RbdService;
+  let headers: HttpHeaders;
 
   const refresh = (data: any) => {
     summaryService['summaryDataSource'].next(data);
@@ -58,6 +58,7 @@ describe('RbdListComponent', () => {
     component = fixture.componentInstance;
     summaryService = TestBed.inject(SummaryService);
     rbdService = TestBed.inject(RbdService);
+    headers = new HttpHeaders().set('X-Total-Count', '10');
 
     // this is needed because summaryService isn't being reset after each test.
     summaryService['summaryDataSource'] = new BehaviorSubject(null);
@@ -88,59 +89,6 @@ describe('RbdListComponent', () => {
       spyOn(component.table, 'reset');
       summaryService['summaryDataSource'].error(undefined);
       expect(component.table.reset).toHaveBeenCalled();
-      expect(component.tableStatus).toEqual(
-        new TableStatusViewCache(ViewCacheStatus.ValueException)
-      );
-    });
-  });
-
-  describe('handling of provisioned columns', () => {
-    let rbdServiceListSpy: jasmine.Spy;
-
-    const images = [
-      {
-        name: 'img1',
-        pool_name: 'rbd',
-        features_name: ['layering', 'exclusive-lock'],
-        disk_usage: null,
-        total_disk_usage: null
-      },
-      {
-        name: 'img2',
-        pool_name: 'rbd',
-        features_name: ['layering', 'exclusive-lock', 'object-map', 'fast-diff'],
-        disk_usage: 1024,
-        total_disk_usage: 1024
-      }
-    ];
-
-    beforeEach(() => {
-      component.images = images;
-      refresh({ executing_tasks: [], finished_tasks: [] });
-      rbdServiceListSpy = spyOn(rbdService, 'list');
-    });
-
-    it('should display N/A for Provisioned & Total Provisioned columns if disk usage is null', () => {
-      rbdServiceListSpy.and.callFake(() => of([{ pool_name: 'rbd', status: 1, value: images }]));
-      fixture.detectChanges();
-      const spanWithoutFastDiff = fixture.debugElement.nativeElement.querySelectorAll(
-        '.datatable-body-cell-label span'
-      );
-      // check image with disk usage = null & fast-diff disabled
-      expect(spanWithoutFastDiff[6].textContent).toBe('N/A');
-
-      images[0]['features_name'] = ['layering', 'exclusive-lock', 'object-map', 'fast-diff'];
-      component.images = images;
-      refresh({ executing_tasks: [], finished_tasks: [] });
-
-      rbdServiceListSpy.and.callFake(() => of([{ pool_name: 'rbd', status: 1, value: images }]));
-      fixture.detectChanges();
-
-      const spanWithFastDiff = fixture.debugElement.nativeElement.querySelectorAll(
-        '.datatable-body-cell-label span'
-      );
-      // check image with disk usage = null & fast-diff changed to enabled
-      expect(spanWithFastDiff[6].textContent).toBe('-');
     });
   });
 
@@ -180,7 +128,7 @@ describe('RbdListComponent', () => {
         ]
       });
       expect(component.getDeleteDisableDesc(component.selection)).toBe(
-        'This RBD has cloned snapshots. Please delete related RBDs before deleting this RBD.'
+        'This RBD has cloned snapshots. Please delete related RBDs before deleting this RBD'
       );
     });
 
@@ -258,7 +206,7 @@ describe('RbdListComponent', () => {
       component.images = images;
       refresh({ executing_tasks: [], finished_tasks: [] });
       spyOn(rbdService, 'list').and.callFake(() =>
-        of([{ pool_name: 'rbd', status: 1, value: images }])
+        of([{ pool_name: 'rbd', value: images, headers: headers }])
       );
       fixture.detectChanges();
     });
@@ -297,12 +245,12 @@ describe('RbdListComponent', () => {
 
     it('should show when an existing image is being modified', () => {
       addTask('rbd/edit', 'a');
-      addTask('rbd/delete', 'b');
-      addTask('rbd/flatten', 'c');
-      expect(component.images.length).toBe(3);
       expectItemTasks(component.images[0], 'Updating');
+      addTask('rbd/delete', 'b');
       expectItemTasks(component.images[1], 'Deleting');
+      addTask('rbd/flatten', 'c');
       expectItemTasks(component.images[2], 'Flattening');
+      expect(component.images.length).toBe(3);
     });
   });
 
@@ -314,36 +262,105 @@ describe('RbdListComponent', () => {
 
     expect(tableActions).toEqual({
       'create,update,delete': {
-        actions: ['Create', 'Edit', 'Copy', 'Flatten', 'Delete', 'Move to Trash'],
-        primary: { multiple: 'Create', executing: 'Edit', single: 'Edit', no: 'Create' }
+        actions: [
+          'Create',
+          'Edit',
+          'Copy',
+          'Flatten',
+          'Resync',
+          'Remove Scheduling',
+          'Promote',
+          'Demote',
+          'Move to Trash',
+          'Delete'
+        ],
+        primary: {
+          multiple: 'Create',
+          executing: 'Create',
+          single: 'Create',
+          no: 'Create'
+        }
       },
       'create,update': {
-        actions: ['Create', 'Edit', 'Copy', 'Flatten'],
-        primary: { multiple: 'Create', executing: 'Edit', single: 'Edit', no: 'Create' }
+        actions: [
+          'Create',
+          'Edit',
+          'Copy',
+          'Flatten',
+          'Resync',
+          'Remove Scheduling',
+          'Promote',
+          'Demote'
+        ],
+        primary: {
+          multiple: 'Create',
+          executing: 'Create',
+          single: 'Create',
+          no: 'Create'
+        }
       },
       'create,delete': {
-        actions: ['Create', 'Copy', 'Delete', 'Move to Trash'],
-        primary: { multiple: 'Create', executing: 'Copy', single: 'Copy', no: 'Create' }
+        actions: ['Create', 'Copy', 'Move to Trash', 'Delete'],
+        primary: {
+          multiple: 'Create',
+          executing: 'Create',
+          single: 'Create',
+          no: 'Create'
+        }
       },
       create: {
         actions: ['Create', 'Copy'],
-        primary: { multiple: 'Create', executing: 'Copy', single: 'Copy', no: 'Create' }
+        primary: {
+          multiple: 'Create',
+          executing: 'Create',
+          single: 'Create',
+          no: 'Create'
+        }
       },
       'update,delete': {
-        actions: ['Edit', 'Flatten', 'Delete', 'Move to Trash'],
-        primary: { multiple: 'Edit', executing: 'Edit', single: 'Edit', no: 'Edit' }
+        actions: [
+          'Edit',
+          'Flatten',
+          'Resync',
+          'Remove Scheduling',
+          'Promote',
+          'Demote',
+          'Move to Trash',
+          'Delete'
+        ],
+        primary: {
+          multiple: '',
+          executing: '',
+          single: '',
+          no: ''
+        }
       },
       update: {
-        actions: ['Edit', 'Flatten'],
-        primary: { multiple: 'Edit', executing: 'Edit', single: 'Edit', no: 'Edit' }
+        actions: ['Edit', 'Flatten', 'Resync', 'Remove Scheduling', 'Promote', 'Demote'],
+        primary: {
+          multiple: '',
+          executing: '',
+          single: '',
+          no: ''
+        }
       },
       delete: {
-        actions: ['Delete', 'Move to Trash'],
-        primary: { multiple: 'Delete', executing: 'Delete', single: 'Delete', no: 'Delete' }
+        actions: ['Move to Trash', 'Delete'],
+        primary: {
+          multiple: '',
+          executing: '',
+          single: '',
+          no: ''
+        }
       },
       'no-permissions': {
         actions: [],
-        primary: { multiple: '', executing: '', single: '', no: '' }
+        primary: {
+          multiple: '',
+          executing: '',
+          single: '',
+          no: ''
+        }
       }
     });
   });

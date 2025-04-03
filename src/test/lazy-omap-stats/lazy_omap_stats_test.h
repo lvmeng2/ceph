@@ -16,7 +16,7 @@
 #define CEPH_LAZY_OMAP_STATS_TEST_H
 
 #include <map>
-#include <regex>
+#include <boost/regex.hpp>
 #include <string>
 
 #include "include/compat.h"
@@ -39,9 +39,15 @@ class LazyOmapStatsTest
     unsigned keys = 2000;
     unsigned how_many = 50;
     std::string pool_name = "lazy_omap_test_pool";
+    std::string pool_id;
     unsigned total_bytes = 0;
     unsigned total_keys = 0;
   } conf;
+
+  typedef enum {
+    TARGET_MON,
+    TARGET_MGR
+  } CommandTarget;
 
   LazyOmapStatsTest(LazyOmapStatsTest&) = delete;
   void operator=(LazyOmapStatsTest) = delete;
@@ -51,17 +57,16 @@ class LazyOmapStatsTest
   const std::string get_name() const;
   void create_payload();
   void write_many(const unsigned how_many);
-  void scrub() const;
-  const int find_matches(std::string& output, std::regex& reg) const;
+  void scrub();
+  const int find_matches(std::string& output, boost::regex& reg) const;
   void check_one();
-  const int find_index(std::string& haystack, std::regex& needle,
+  const int find_index(std::string& haystack, boost::regex& needle,
                        std::string label) const;
   const unsigned tally_column(const unsigned omap_bytes_index,
                           const std::string& table, bool header) const;
   void check_column(const int index, const std::string& table,
                     const std::string& type, bool header = true) const;
-  index_t get_indexes(std::regex& reg, std::string& output) const;
-  const std::string get_pool_id(std::string& pool);
+  index_t get_indexes(boost::regex& reg, std::string& output) const;
   void check_pg_dump();
   void check_pg_dump_summary();
   void check_pg_dump_pgs();
@@ -69,7 +74,10 @@ class LazyOmapStatsTest
   void check_pg_ls();
   const std::string get_output(
       const std::string command = R"({"prefix": "pg dump"})",
-      const bool silent = false);
+      const bool silent = false,
+      const CommandTarget target = CommandTarget::TARGET_MGR);
+  void get_pool_id(const std::string& pool);
+  std::map<std::string, std::string> get_scrub_stamps();
   void wait_for_active_clean();
 
  public:

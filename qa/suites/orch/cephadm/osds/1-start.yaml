@@ -20,6 +20,12 @@ openstack:
     size: 10 # GB
 overrides:
   ceph:
+    log-ignorelist:
+      - OSD_DOWN
+      - CEPHADM_FAILED_DAEMON
+      - but is still running
     conf:
       osd:
         osd shutdown pgref assert: true
+    log-only-match:
+      - CEPHADM_

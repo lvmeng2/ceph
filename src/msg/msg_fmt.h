@@ -8,7 +8,6 @@
 
 #include <fmt/format.h>
 
-#include "include/types_fmt.h"
 #include "msg/msg_types.h"
 
 template <>
@@ -16,7 +15,7 @@ struct fmt::formatter<entity_name_t> {
   constexpr auto parse(format_parse_context& ctx) { return ctx.begin(); }
 
   template <typename FormatContext>
-  auto format(const entity_name_t& addr, FormatContext& ctx)
+  auto format(const entity_name_t& addr, FormatContext& ctx) const
   {
     if (addr.is_new() || addr.num() < 0) {
       return fmt::format_to(ctx.out(), "{}.?", addr.type_str());

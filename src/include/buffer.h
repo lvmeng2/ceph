@@ -39,7 +39,6 @@
 #endif
 
 #include <iosfwd>
-#include <iomanip>
 #include <list>
 #include <memory>
 #include <vector>
@@ -127,7 +126,6 @@ struct error_code;
   class raw_static;
   class raw_posix_aligned;
   class raw_hack_aligned;
-  class raw_char;
   class raw_claimed_char;
   class raw_unshareable; // diagnostic, unshareable char buffer
   class raw_combined;
@@ -154,11 +152,11 @@ struct error_code;
 #ifdef HAVE_SEASTAR
   /// create a raw buffer to wrap seastar cpu-local memory, using foreign_ptr to
   /// make it safe to share between cpus
-  ceph::unique_leakable_ptr<buffer::raw> create_foreign(seastar::temporary_buffer<char>&& buf);
+  ceph::unique_leakable_ptr<buffer::raw> create(seastar::temporary_buffer<char>&& buf);
   /// create a raw buffer to wrap seastar cpu-local memory, without the safety
   /// of foreign_ptr. the caller must otherwise guarantee that the buffer ptr is
   /// destructed on this cpu
-  ceph::unique_leakable_ptr<buffer::raw> create(seastar::temporary_buffer<char>&& buf);
+  ceph::unique_leakable_ptr<buffer::raw> create_local(seastar::temporary_buffer<char>&& buf);
 #endif
 
   /*
@@ -250,7 +248,6 @@ struct error_code;
 
     bool have_raw() const { return _raw ? true:false; }
 
-    ceph::unique_leakable_ptr<raw> clone();
     void swap(ptr& other) noexcept;
 
     iterator begin(size_t offset=0) {
@@ -440,7 +437,13 @@ struct error_code;
 	buffers_iterator(U* const p)
 	  : cur(p) {
 	}
-	template <class U>
+	// copy constructor
+	buffers_iterator(const buffers_iterator<T>& other)
+	  : cur(other.cur) {
+	}
+	// converting constructor, from iterator -> const_iterator only
+	template <class U, typename std::enable_if<
+	    std::is_const<T>::value && !std::is_const<U>::value, int>::type = 0>
 	buffers_iterator(const buffers_iterator<U>& other)
 	  : cur(other.cur) {
 	}
@@ -474,11 +477,6 @@ struct error_code;
 	}
 	bool operator!=(const buffers_iterator& rhs) const {
 	  return !(*this==rhs);
-	}
-
-	using citer_t = buffers_iterator<typename std::add_const<T>::type>;
-	operator citer_t() const {
-	  return citer_t(cur);
 	}
       };
 
@@ -595,13 +593,13 @@ struct error_code;
 	}
       }
       void clear_and_dispose() {
-	for (auto it = begin(); it != end(); /* nop */) {
-	  auto& node = *it;
-	  it = it->next;
-	  ptr_node::disposer()(&node);
-	}
-	_root.next = &_root;
-	_tail = &_root;
+        ptr_node::disposer dispose;
+        for (auto it = begin(), e = end(); it != e; /* nop */) {
+          auto& node = *it++;
+          dispose(&node);
+        }
+        _tail = &_root;
+        _root.next = _tail;
       }
       iterator erase_after_and_dispose(iterator it) {
 	auto* to_dispose = &*std::next(it);
@@ -701,6 +699,12 @@ struct error_code;
       void copy_shallow(unsigned len, ptr &dest);
       void copy(unsigned len, list &dest);
       void copy(unsigned len, std::string &dest);
+      template<typename A>
+      void copy(unsigned len, std::vector<uint8_t,A>& u8v) {
+        u8v.resize(len);
+        copy(len, (char*)u8v.data());
+      }
+
       void copy_all(list &dest);
 
       // get a pointer to the currenet iterator position, return the
@@ -864,7 +868,9 @@ struct error_code;
 	if (first_round) {
 	  impl_f(first_round);
 	}
-	if (const auto second_round = len - first_round; second_round) {
+	// no C++17 for the sake of the C++11 guarantees of librados, sorry.
+	const auto second_round = len - first_round;
+	if (second_round) {
 	  _refill(second_round);
 	  impl_f(second_round);
 	}
@@ -1139,6 +1145,10 @@ struct error_code;
     void append(std::string_view s) {
       append(s.data(), s.length());
     }
+    template<typename A>
+    void append(const std::vector<uint8_t,A>& u8v) {
+      append((const char *)u8v.data(), u8v.size());
+    }
 #endif // __cplusplus >= 201703L
     void append(const ptr& bp);
     void append(ptr&& bp);
@@ -1283,6 +1293,23 @@ std::ostream& operator<<(std::ostream& out, const buffer::list& bl);
 inline bufferhash& operator<<(bufferhash& l, const bufferlist &r) {
   l.update(r);
   return l;
+}
+
+static inline
+void copy_bufferlist_to_iovec(const struct iovec *iov, unsigned iovcnt,
+                              bufferlist *bl, int64_t r)
+{
+  auto iter = bl->cbegin();
+  for (unsigned j = 0, resid = r; j < iovcnt && resid > 0; j++) {
+         /*
+          * This piece of code aims to handle the case that bufferlist
+          * does not have enough data to fill in the iov
+          */
+         const auto round_size = std::min<unsigned>(resid, iov[j].iov_len);
+         iter.copy(round_size, reinterpret_cast<char*>(iov[j].iov_base));
+         resid -= round_size;
+         /* iter is self-updating */
+  }
 }
 
 } // namespace buffer

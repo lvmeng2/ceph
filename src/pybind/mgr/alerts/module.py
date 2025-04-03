@@ -4,6 +4,7 @@ A simple cluster health alerting module.
 """
 
 from mgr_module import CLIReadCommand, HandleCommandResult, MgrModule, Option
+from email.utils import formatdate, make_msgid
 from threading import Event
 from typing import Any, Optional, Dict, List, TYPE_CHECKING, Union
 import json
@@ -27,7 +28,7 @@ class Alerts(MgrModule):
         Option(
             name='smtp_destination',
             default='',
-            desc='Email address to send alerts to',
+            desc='Email address to send alerts to, use commas to separate multiple',
             runtime=True),
         Option(
             name='smtp_port',
@@ -203,12 +204,16 @@ class Alerts(MgrModule):
         message = ('From: {from_name} <{sender}>\n'
                    'Subject: {status}\n'
                    'To: {target}\n'
+                   'Message-Id: {message_id}\n'
+                   'Date: {date}\n'
                    '\n'
                    '{status}\n'.format(
                        sender=self.smtp_sender,
                        from_name=self.smtp_from_name,
                        status=status['status'],
-                       target=self.smtp_destination))
+                       target=self.smtp_destination,
+                       message_id=make_msgid(),
+                       date=formatdate()))
 
         if 'new' in diff:
             message += ('\n--- New ---\n')
@@ -238,7 +243,7 @@ class Alerts(MgrModule):
                 server = smtplib.SMTP(self.smtp_host, self.smtp_port)
             if self.smtp_password:
                 server.login(self.smtp_user, self.smtp_password)
-            server.sendmail(self.smtp_sender, self.smtp_destination, message)
+            server.sendmail(self.smtp_sender, self.smtp_destination.split(','), message)
             server.quit()
         except Exception as e:
             return {

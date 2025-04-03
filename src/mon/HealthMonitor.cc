@@ -25,6 +25,7 @@
 
 #include "mon/Monitor.h"
 #include "mon/HealthMonitor.h"
+#include "mon/OSDMonitor.h"
 
 #include "messages/MMonHealthChecks.h"
 
@@ -300,13 +301,19 @@ bool HealthMonitor::prepare_command(MonOpRequestRef op)
     cmd_getval(cmdmap, "sticky", sticky);
     string ttl_str;
     utime_t ttl;
+    std::chrono::seconds secs;
     if (cmd_getval(cmdmap, "ttl", ttl_str)) {
-      auto secs = parse_timespan(ttl_str);
-      if (secs == 0s) {
-	r = -EINVAL;
-	ss << "not a valid duration: " << ttl_str;
-	goto out;
+      try {
+        secs = parse_timespan(ttl_str);
+        if (secs == 0s) {
+          throw std::invalid_argument("timespan = 0");
+        }
+      } catch (const std::invalid_argument& e) {
+        ss << "invalid duration: " << ttl_str << " (" << e.what() << ")";
+        r = -EINVAL;
+        goto out;
       }
+      
       ttl = ceph_clock_now();
       ttl += std::chrono::duration<double>(secs).count();
     }
@@ -350,7 +357,7 @@ out:
 
   if (r >= 0) {
     // success.. delay reply
-    wait_for_finished_proposal(op, new Monitor::C_Command(mon, op, r, rs,
+    wait_for_commit(op, new Monitor::C_Command(mon, op, r, rs,
 					      get_last_committed() + 1));
     return true;
   } else {
@@ -394,7 +401,7 @@ void HealthMonitor::tick()
 
 bool HealthMonitor::check_mutes()
 {
-  bool changed = true;
+  bool changed = false;
   auto now = ceph_clock_now();
   health_check_map_t all;
   gather_all_health_checks(&all);
@@ -734,6 +741,8 @@ bool HealthMonitor::check_leader_health()
   if (g_conf().get_val<bool>("mon_warn_on_msgr2_not_enabled")) {
     check_if_msgr2_enabled(&next);
   }
+  // STRETCH MODE
+  check_mon_crush_loc_stretch_mode(&next);
 
   if (next != leader_checks) {
     changed = true;
@@ -797,9 +806,14 @@ void HealthMonitor::check_for_mon_down(health_check_map_t *checks)
 {
   int max = mon.monmap->size();
   int actual = mon.get_quorum().size();
-  const auto now = ceph::real_clock::now();
+  const auto rcnow = ceph::real_clock::now();
+  const auto created = mon.monmap->created.to_real_time();
+  const auto mcnow = ceph::coarse_mono_clock::now();
+  const auto starttime = mon.get_starttime();
+
   if (actual < max &&
-      now > mon.monmap->created.to_real_time() + g_conf().get_val<std::chrono::seconds>("mon_down_mkfs_grace")) {
+      (rcnow - created) > g_conf().get_val<std::chrono::seconds>("mon_down_mkfs_grace") &&
+      (mcnow - starttime) > g_conf().get_val<std::chrono::seconds>("mon_down_uptime_grace")) {
     ostringstream ss;
     ss << (max-actual) << "/" << max << " mons down, quorum "
        << mon.get_quorum_names();
@@ -872,5 +886,35 @@ void HealthMonitor::check_if_msgr2_enabled(health_check_map_t *checks)
 			    details.size());
       d.detail.swap(details);
     }
+  }
+}
+
+void HealthMonitor::check_mon_crush_loc_stretch_mode(health_check_map_t *checks)
+{
+  // Check if the CRUSH location exists for all MONs
+  if (!mon.monmap->stretch_mode_enabled){
+    return;
+  }
+  list<string> details;
+  for (auto& i : mon.monmap->mon_info) {
+    // Skip the tiebreaker monitor
+    if (i.second.name == mon.monmap->tiebreaker_mon) {
+      continue;
+    }
+    for (auto& pair : i.second.crush_loc){
+      if (!mon.osdmon()->osdmap.crush->name_exists(pair.second)) {
+        ostringstream ds;
+        ds << "CRUSH location " << pair.second << " does not exist";
+        details.push_back(ds.str());
+      }
+    }
+  }
+  // WARN in ceph -s if the CRUSH location does not exist
+  if (!details.empty()) {
+    ostringstream ss;
+    ss << details.size() << " monitor(s) have nonexistent CRUSH location";
+    auto &d = checks->add("NONEXISTENT_MON_CRUSH_LOC_STRETCH_MODE", HEALTH_WARN, ss.str(),
+                details.size());
+    d.detail.swap(details);
   }
 }

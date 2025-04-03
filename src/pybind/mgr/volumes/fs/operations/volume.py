@@ -1,6 +1,6 @@
 import errno
 import logging
-import sys
+import os
 
 from typing import List, Tuple
 
@@ -9,13 +9,14 @@ from contextlib import contextmanager
 import orchestrator
 
 from .lock import GlobalLock
-from ..exception import VolumeException
+from ..exception import VolumeException, IndexException
 from ..fs_util import create_pool, remove_pool, rename_pool, create_filesystem, \
-    remove_filesystem, rename_filesystem, create_mds, volume_exists
+    remove_filesystem, rename_filesystem, create_mds, volume_exists, listdir
+from .trash import Trash
 from mgr_util import open_filesystem, CephfsConnectionException
+from .clone_index import open_clone_index
 
 log = logging.getLogger(__name__)
-
 
 def gen_pool_names(volname):
     """
@@ -40,7 +41,7 @@ def get_pool_names(mgr, volname):
     """
     fs_map = mgr.get("fs_map")
     metadata_pool_id = None
-    data_pool_ids = [] # type: List[int]
+    data_pool_ids: List[int] = []
     for f in fs_map['filesystems']:
         if volname == f['mdsmap']['fs_name']:
             metadata_pool_id = f['mdsmap']['metadata_pool']
@@ -55,20 +56,73 @@ def get_pool_names(mgr, volname):
     data_pools = [pools[id] for id in data_pool_ids]
     return metadata_pool, data_pools
 
-def create_volume(mgr, volname, placement):
+def get_pool_ids(mgr, volname):
     """
-    create volume  (pool, filesystem and mds)
+    return metadata and data pools (list) id of volume as a tuple
     """
+    fs_map = mgr.get("fs_map")
+    metadata_pool_id = None
+    data_pool_ids: List[int] = []
+    for f in fs_map['filesystems']:
+        if volname == f['mdsmap']['fs_name']:
+            metadata_pool_id = f['mdsmap']['metadata_pool']
+            data_pool_ids = f['mdsmap']['data_pools']
+            break
+    if metadata_pool_id is None:
+        return None, None
+    return metadata_pool_id, data_pool_ids
+
+def create_fs_pools(mgr, volname, data_pool, metadata_pool):
+    '''
+    Generate names of metadata pool and data pool and create these pools.
+
+    This methods returns a list where the first member represents whether or
+    not this method ran successfullly.
+    '''
+    assert not data_pool and not metadata_pool
+
     metadata_pool, data_pool = gen_pool_names(volname)
-    # create pools
+
     r, outb, outs = create_pool(mgr, metadata_pool)
     if r != 0:
-        return r, outb, outs
-    r, outb, outs = create_pool(mgr, data_pool)
+        return [False, r, outb, outs]
+
+    # default to a bulk pool for data. In case autoscaling has been disabled
+    # for the cluster with `ceph osd pool set noautoscale`, this will have
+    # no effect.
+    r, outb, outs = create_pool(mgr, data_pool, bulk=True)
+    # cleanup
     if r != 0:
-        #cleanup
         remove_pool(mgr, metadata_pool)
-        return r, outb, outs
+        return [False, r, outb, outs]
+
+    return [True, data_pool, metadata_pool]
+
+def create_volume(mgr, volname, placement, data_pool, metadata_pool):
+    """
+    Create volume, create pools if pool names are not passed and create MDS
+    based on placement passed.
+    """
+    # although writing this case is technically redundant (because pool names
+    # are passed by user they must exist already), leave it here so that some
+    # future readers know that this case is already considered and not missed
+    # by chance.
+    if data_pool and metadata_pool:
+        pass
+    elif not data_pool and metadata_pool:
+        errmsg = 'data pool name isn\'t passed'
+        return -errno.EINVAL, '', errmsg
+    elif data_pool and not metadata_pool:
+        errmsg = 'metadata pool name isn\'t passed'
+        return -errno.EINVAL, '', errmsg
+    elif not data_pool and not metadata_pool:
+        retval = create_fs_pools(mgr, volname, data_pool, metadata_pool)
+        success = retval.pop(0)
+        if success:
+            data_pool, metadata_pool = retval
+        else:
+            return retval
+
     # create filesystem
     r, outb, outs = create_filesystem(mgr, volname, metadata_pool, data_pool)
     if r != 0:
@@ -114,7 +168,11 @@ def delete_volume(mgr, volname, metadata_pool, data_pools):
         r, outb, outs = remove_pool(mgr, data_pool)
         if r != 0:
             return r, outb, outs
-    result_str = "metadata pool: {0} data pool: {1} removed".format(metadata_pool, str(data_pools))
+    result_str = f"metadata pool: {metadata_pool} data pool: {str(data_pools)} removed.\n"
+    result_str += "If there are active snapshot schedules associated with this "
+    result_str += "volume, you might see EIO errors in the mgr logs or at the "
+    result_str += "snap-schedule command-line due to the missing volume. "
+    result_str += "However, these errors are transient and will get auto-resolved."
     return r, result_str, ""
 
 def rename_volume(mgr, volname: str, newvolname: str) -> Tuple[int, str, str]:
@@ -216,16 +274,53 @@ def rename_volume(mgr, volname: str, newvolname: str) -> Tuple[int, str, str]:
 
 def list_volumes(mgr):
     """
-    list all filesystem volumes.
+    Get name of all volumes/file systems.
 
-    :param: None
-    :return: None
+    :param: mgr
+    :return: list of volume/file system names
     """
     result = []
-    fs_map = mgr.get("fs_map")
-    for f in fs_map['filesystems']:
-        result.append({'name': f['mdsmap']['fs_name']})
+    for fs in mgr.get("fs_map")['filesystems']:
+        result.append(fs['mdsmap']['fs_name'])
     return result
+
+
+def get_pending_subvol_deletions_count(fs, path):
+    """
+    Get the number of pending subvolumes deletions.
+    """
+    trashdir = os.path.join(path, Trash.GROUP_NAME)
+    try:
+        num_pending_subvol_del = len(listdir(fs, trashdir, filter_entries=None, filter_files=False))
+    except VolumeException as ve:
+        if ve.errno == -errno.ENOENT:
+            num_pending_subvol_del = 0
+
+    return {'pending_subvolume_deletions': num_pending_subvol_del}
+
+
+def get_all_pending_clones_count(self, mgr, vol_spec):
+    pending_clones_cnt = 0
+    index_path = ""
+    fs_map = mgr.get('fs_map')
+    for fs in fs_map['filesystems']:
+        volname = fs['mdsmap']['fs_name']
+        try:
+            with open_volume(self, volname) as fs_handle:
+                with open_clone_index(fs_handle, vol_spec) as index:
+                    index_path = index.path.decode('utf-8')
+                    pending_clones_cnt = pending_clones_cnt \
+                                            + len(listdir(fs_handle, index_path,
+                                                          filter_entries=None, filter_files=False))
+        except IndexException as e:
+            if e.errno == -errno.ENOENT:
+                continue
+            raise VolumeException(-e.args[0], e.args[1])
+        except VolumeException as ve:
+            log.error("error fetching clone entry for volume '{0}' ({1})".format(volname, ve))
+            raise ve
+
+    return pending_clones_cnt
 
 
 @contextmanager

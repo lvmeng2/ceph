@@ -24,9 +24,13 @@
 #include "CDentry.h"
 #include "CDir.h"
 
-#include "include/unordered_set.h"
+#include <unordered_set>
 
-using ceph::unordered_set;
+#include <cstdint>
+#include <map>
+#include <ostream>
+#include <set>
+#include <vector>
 
 class CDir;
 class CInode;
@@ -70,7 +74,7 @@ class LogSegment {
 
   const seq_t seq;
   uint64_t offset, end;
-  int num_events = 0;
+  uint64_t num_events = 0;
 
   // dirty items
   elist<CDir*>    dirty_dirfrags, new_dirfrags;
@@ -87,7 +91,7 @@ class LogSegment {
   interval_set<inodeno_t> purging_inodes;
   MDSContext* purged_cb = nullptr;
 
-  std::map<int, ceph::unordered_set<version_t> > pending_commit_tids;  // mdstable
+  std::map<int, std::unordered_set<version_t>> pending_commit_tids;  // mdstable
   std::set<metareqid_t> uncommitted_leaders;
   std::set<metareqid_t> uncommitted_peers;
   std::set<dirfrag_t> uncommitted_fragments;
@@ -105,5 +109,10 @@ class LogSegment {
 
   MDSContext::vec expiry_waiters;
 };
+
+static inline std::ostream& operator<<(std::ostream& out, const LogSegment& ls) {
+  return out << "LogSegment(" << ls.seq << "/0x" << std::hex << ls.offset
+             << "~" << ls.end << std::dec << " events=" << ls.num_events << ")";
+}
 
 #endif

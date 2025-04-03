@@ -55,7 +55,7 @@ Create tracing session, enable tracepoints and start trace::
   lttng enable-event --userspace osd:*
   lttng start
 
-Perform some ceph operatin::
+Perform some Ceph operation::
 
   rados bench -p ec 5 write
 
@@ -71,6 +71,9 @@ Destroy tracing session::
 =========================
  Tracing Ceph With Blkin
 =========================
+
+.. deprecated:: This feature was deprecated in the Squid release and will
+   be removed in a later release.
 
 Ceph can use Blkin, a library created by Marios Kogias and others,
 which enables tracking a specific request from the time it enters

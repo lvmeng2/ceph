@@ -1,17 +1,19 @@
 import { HttpClientTestingModule } from '@angular/common/http/testing';
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { ReactiveFormsModule } from '@angular/forms';
+import { ActivatedRoute } from '@angular/router';
 import { RouterTestingModule } from '@angular/router/testing';
 
-import { NgbActiveModal } from '@ng-bootstrap/ng-bootstrap';
 import { ToastrModule } from 'ngx-toastr';
 import { of } from 'rxjs';
 
 import { RbdMirroringService } from '~/app/shared/api/rbd-mirroring.service';
 import { NotificationService } from '~/app/shared/services/notification.service';
 import { SharedModule } from '~/app/shared/shared.module';
+import { ActivatedRouteStub } from '~/testing/activated-route-stub';
 import { configureTestBed, FormHelper } from '~/testing/unit-test-helper';
 import { PoolEditModeModalComponent } from './pool-edit-mode-modal.component';
+import { ModalModule, SelectModule } from 'carbon-components-angular';
 
 describe('PoolEditModeModalComponent', () => {
   let component: PoolEditModeModalComponent;
@@ -19,6 +21,7 @@ describe('PoolEditModeModalComponent', () => {
   let notificationService: NotificationService;
   let rbdMirroringService: RbdMirroringService;
   let formHelper: FormHelper;
+  let activatedRoute: ActivatedRouteStub;
 
   configureTestBed({
     declarations: [PoolEditModeModalComponent],
@@ -27,9 +30,16 @@ describe('PoolEditModeModalComponent', () => {
       ReactiveFormsModule,
       RouterTestingModule,
       SharedModule,
-      ToastrModule.forRoot()
+      ToastrModule.forRoot(),
+      ModalModule,
+      SelectModule
     ],
-    providers: [NgbActiveModal]
+    providers: [
+      {
+        provide: ActivatedRoute,
+        useValue: new ActivatedRouteStub({ pool_name: 'somePool' })
+      }
+    ]
   });
 
   beforeEach(() => {
@@ -41,6 +51,7 @@ describe('PoolEditModeModalComponent', () => {
     spyOn(notificationService, 'show').and.stub();
 
     rbdMirroringService = TestBed.inject(RbdMirroringService);
+    activatedRoute = <ActivatedRouteStub>TestBed.inject(ActivatedRoute);
 
     formHelper = new FormHelper(component.editModeForm);
     fixture.detectChanges();
@@ -52,14 +63,11 @@ describe('PoolEditModeModalComponent', () => {
 
   describe('update pool mode', () => {
     beforeEach(() => {
-      spyOn(component.activeModal, 'close').and.callThrough();
-    });
-
-    afterEach(() => {
-      expect(component.activeModal.close).toHaveBeenCalledTimes(1);
+      spyOn(component, 'closeModal').and.callThrough();
     });
 
     it('should call updatePool', () => {
+      activatedRoute.setParams({ pool_name: 'somePool' });
       spyOn(rbdMirroringService, 'updatePool').and.callFake(() => of(''));
 
       component.editModeForm.patchValue({ mirrorMode: 'disabled' });

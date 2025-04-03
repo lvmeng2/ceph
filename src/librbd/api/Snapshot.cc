@@ -15,6 +15,8 @@
 
 #include <boost/variant.hpp>
 
+#include <shared_mutex> // for std::shared_lock
+
 #define dout_subsys ceph_subsys_rbd
 #undef dout_prefix
 #define dout_prefix *_dout << "librbd::api::Snapshot: " << __func__ << ": "
@@ -26,7 +28,7 @@ namespace api {
 
 namespace {
 
-class GetGroupVisitor : public boost::static_visitor<int> {
+class GetGroupVisitor {
 public:
   CephContext* cct;
   librados::IoCtx *image_ioctx;
@@ -80,12 +82,12 @@ public:
   }
 };
 
-class GetTrashVisitor : public boost::static_visitor<int> {
+class GetTrashVisitor {
 public:
-  std::string* original_name;
+  snap_trash_namespace_t *trash_snap;
 
-  explicit GetTrashVisitor(std::string* original_name)
-    : original_name(original_name) {
+  explicit GetTrashVisitor(snap_trash_namespace_t *trash_snap)
+    : trash_snap(trash_snap) {
   }
 
   template <typename T>
@@ -95,12 +97,14 @@ public:
 
   inline int operator()(
       const cls::rbd::TrashSnapshotNamespace& snap_namespace) {
-    *original_name = snap_namespace.original_name;
+    trash_snap->original_namespace_type = static_cast<snap_namespace_type_t>(
+      snap_namespace.original_snapshot_namespace_type);
+    trash_snap->original_name = snap_namespace.original_name;
     return 0;
   }
 };
 
-class GetMirrorVisitor : public boost::static_visitor<int> {
+class GetMirrorVisitor {
 public:
   snap_mirror_namespace_t *mirror_snap;
 
@@ -143,7 +147,7 @@ int Snapshot<I>::get_group_namespace(I *ictx, uint64_t snap_id,
   }
 
   GetGroupVisitor ggv = GetGroupVisitor(ictx->cct, &ictx->md_ctx, group_snap);
-  r = boost::apply_visitor(ggv, snap_info->snap_namespace);
+  r = snap_info->snap_namespace.visit(ggv);
   if (r < 0) {
     return r;
   }
@@ -153,7 +157,7 @@ int Snapshot<I>::get_group_namespace(I *ictx, uint64_t snap_id,
 
 template <typename I>
 int Snapshot<I>::get_trash_namespace(I *ictx, uint64_t snap_id,
-                                     std::string* original_name) {
+                                     snap_trash_namespace_t *trash_snap) {
   int r = ictx->state->refresh_if_required();
   if (r < 0) {
     return r;
@@ -165,8 +169,8 @@ int Snapshot<I>::get_trash_namespace(I *ictx, uint64_t snap_id,
     return -ENOENT;
   }
 
-  auto visitor = GetTrashVisitor(original_name);
-  r = boost::apply_visitor(visitor, snap_info->snap_namespace);
+  auto visitor = GetTrashVisitor(trash_snap);
+  r = snap_info->snap_namespace.visit(visitor);
   if (r < 0) {
     return r;
   }
@@ -189,7 +193,7 @@ int Snapshot<I>::get_mirror_namespace(
   }
 
   auto gmv = GetMirrorVisitor(mirror_snap);
-  r = boost::apply_visitor(gmv, snap_info->snap_namespace);
+  r = snap_info->snap_namespace.visit(gmv);
   if (r < 0) {
     return r;
   }
@@ -378,7 +382,9 @@ int Snapshot<I>::remove(I *ictx, const char *snap_name, uint32_t flags,
 template <typename I>
 int Snapshot<I>::get_timestamp(I *ictx, uint64_t snap_id, struct timespec *timestamp) {
   auto snap_it = ictx->snap_info.find(snap_id);
-  ceph_assert(snap_it != ictx->snap_info.end());
+  if (snap_it == ictx->snap_info.end()) {
+    return -ENOENT;
+  }
   utime_t time = snap_it->second.timestamp;
   time.to_timespec(timestamp);
   return 0;

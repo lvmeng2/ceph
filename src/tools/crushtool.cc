@@ -27,6 +27,7 @@
 #include "common/errno.h"
 #include "common/config.h"
 #include "common/Formatter.h"
+#include "common/strtol.h" // for strict_strtol()
 
 #include "common/ceph_argparse.h"
 #include "include/stringify.h"
@@ -1289,7 +1290,7 @@ int main(int argc, const char **argv)
 	tester.get_output_utilization())
       tester.set_output_statistics(true);
 
-    int r = tester.test();
+    int r = tester.test(cct->get());
     if (r < 0)
       return EXIT_FAILURE;
   }

@@ -13,9 +13,13 @@ top_level = \
         os.path.dirname(
             os.path.abspath(__file__)))
 
-pybind_rgw_mod = __import__('rgw', globals(), locals(), [], 0)
-sys.modules['pybind_rgw_mod'] = pybind_rgw_mod
-
+# it could be that ceph was built without RGW support
+# e.g. in a local development environment
+try:
+    pybind_rgw_mod = __import__('rgw', globals(), locals(), [], 0)
+    sys.modules['pybind_rgw_mod'] = pybind_rgw_mod
+except Exception:
+    pass
 
 def parse_ceph_release():
     with open(os.path.join(top_level, 'src/ceph_release')) as f:
@@ -72,7 +76,7 @@ html_show_sphinx = False
 html_static_path = ["_static"]
 html_sidebars = {
     '**': ['smarttoc.html', 'searchbox.html']
-    }
+}
 
 html_css_files = ['css/custom.css']
 
@@ -112,6 +116,8 @@ build_with_rtd = os.environ.get('READTHEDOCS') == 'True'
 
 sys.path.insert(0, os.path.abspath('_ext'))
 
+smartquotes_action = "qe"
+
 extensions = [
     'sphinx.ext.autodoc',
     'sphinx.ext.graphviz',
@@ -124,15 +130,26 @@ extensions = [
     'ceph_commands',
     'ceph_releases',
     'ceph_confval',
+    'sphinxcontrib.mermaid',
     'sphinxcontrib.openapi',
     'sphinxcontrib.seqdiag',
-    ]
+]
 
 ditaa = shutil.which("ditaa")
 if ditaa is not None:
     # in case we don't have binfmt_misc enabled or jar is not registered
-    ditaa_args = ['-jar', ditaa]
-    ditaa = 'java'
+    _jar_paths = [
+        '/usr/share/ditaa/lib/ditaa.jar',  # Gentoo
+        '/usr/share/ditaa/ditaa.jar',  # deb
+        '/usr/share/java/ditaa.jar',  # rpm
+    ]
+    _jar_paths = [p for p in _jar_paths if os.path.exists(p)]
+    if _jar_paths:
+        ditaa = 'java'
+        ditaa_args = ['-jar', _jar_paths[0]]
+    else:
+        # keep ditaa from shutil.which
+        ditaa_args = []
     extensions += ['sphinxcontrib.ditaa']
 else:
     extensions += ['plantweb.directive']
@@ -167,7 +184,8 @@ breathe_domain_by_extension = {'py': 'py',
 breathe_doxygen_config_options = {
     'EXPAND_ONLY_PREDEF': 'YES',
     'MACRO_EXPANSION': 'YES',
-    'PREDEFINED': 'CEPH_RADOS_API= '
+    'PREDEFINED': 'CEPH_RADOS_API= ',
+    'WARN_IF_UNDOCUMENTED': 'NO',
 }
 
 # graphviz options

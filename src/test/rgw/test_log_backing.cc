@@ -18,10 +18,9 @@
 #include <iostream>
 #include <string_view>
 
-#undef FMT_HEADER_ONLY
-#define FMT_HEADER_ONLY 1
 #include <fmt/format.h>
 
+#include "common/Clock.h" // for ceph_clock_now()
 #include "include/types.h"
 #include "include/rados/librados.hpp"
 
@@ -30,8 +29,8 @@
 
 #include "cls/log/cls_log_client.h"
 
-#include "rgw/rgw_tools.h"
-#include "rgw/cls_fifo_legacy.h"
+#include "rgw_tools.h"
+#include "cls_fifo_legacy.h"
 
 #include "gtest/gtest.h"
 
@@ -75,7 +74,7 @@ protected:
       cb::list bl;
       encode(i, bl);
       cls_log_add(op, ceph_clock_now(), {}, "meow", bl);
-      auto r = rgw_rados_operate(&dp, ioctx, get_oid(0, i), &op, null_yield);
+      auto r = rgw_rados_operate(&dp, ioctx, get_oid(0, i), std::move(op), null_yield);
       ASSERT_GE(r, 0);
     }
   }
@@ -86,7 +85,7 @@ protected:
     cb::list bl;
     encode(i, bl);
     cls_log_add(op, ceph_clock_now(), {}, "meow", bl);
-    auto r = rgw_rados_operate(&dp, ioctx, get_oid(0, i), &op, null_yield);
+    auto r = rgw_rados_operate(&dp, ioctx, get_oid(0, i), std::move(op), null_yield);
     ASSERT_GE(r, 0);
   }
 
@@ -99,14 +98,14 @@ protected:
 	std::list<cls_log_entry> entries;
 	bool truncated = false;
 	cls_log_list(op, {}, {}, {}, 1, entries, &to_marker, &truncated);
-	auto r = rgw_rados_operate(&dp, ioctx, oid, &op, nullptr, null_yield);
+	auto r = rgw_rados_operate(&dp, ioctx, oid, std::move(op), nullptr, null_yield);
 	ASSERT_GE(r, 0);
 	ASSERT_FALSE(entries.empty());
       }
       {
 	lr::ObjectWriteOperation op;
 	cls_log_trim(op, {}, {}, {}, to_marker);
-	auto r = rgw_rados_operate(&dp, ioctx, oid, &op, null_yield);
+	auto r = rgw_rados_operate(&dp, ioctx, oid, std::move(op), null_yield);
 	ASSERT_GE(r, 0);
       }
       {
@@ -114,7 +113,7 @@ protected:
 	std::list<cls_log_entry> entries;
 	bool truncated = false;
 	cls_log_list(op, {}, {}, {}, 1, entries, &to_marker, &truncated);
-	auto r = rgw_rados_operate(&dp, ioctx, oid, &op, nullptr, null_yield);
+	auto r = rgw_rados_operate(&dp, ioctx, oid, std::move(op), nullptr, null_yield);
 	ASSERT_GE(r, 0);
 	ASSERT_TRUE(entries.empty());
       }

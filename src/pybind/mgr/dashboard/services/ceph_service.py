@@ -5,12 +5,14 @@ import logging
 
 import rados
 from mgr_module import CommandResult
-from mgr_util import get_most_recent_rate, get_time_series_rates
+from mgr_util import get_most_recent_rate, get_time_series_rates, name_to_config_section
 
 from .. import mgr
+from ..model.rgw import EncryptionConfig, EncryptionTypes, KmipConfig, \
+    KmsConfig, KmsProviders, S3Config, VaultConfig
 
 try:
-    from typing import Any, Dict, Optional, Union
+    from typing import Any, Dict, List, Optional, Union
 except ImportError:
     pass  # For typing only
 
@@ -24,7 +26,7 @@ class SendCommandError(rados.Error):
         super(SendCommandError, self).__init__(err, errno)
 
 
-# pylint: disable=too-many-public-methods
+# pylint: disable=R0904
 class CephService(object):
 
     OSD_FLAG_NO_SCRUB = 'noscrub'
@@ -183,6 +185,117 @@ class CephService(object):
         return None
 
     @classmethod
+    def get_encryption_config(cls, daemon_name: str) -> Dict[str, Any]:
+        full_daemon_name = f'rgw.{daemon_name}'
+
+        encryption_config = EncryptionConfig(kms=None, s3=None)
+
+        # Fetch configuration for KMS
+        if EncryptionTypes.KMS.value:
+            vault_config_data: Optional[Dict[str, Any]] = _get_conf_keys(
+                list(VaultConfig._fields), VaultConfig.required_fields(),
+                EncryptionTypes.KMS.value, KmsProviders.VAULT.value, full_daemon_name
+            )
+
+            kmip_config_data: Optional[Dict[str, Any]] = _get_conf_keys(
+                list(KmipConfig._fields), KmipConfig.required_fields(),
+                EncryptionTypes.KMS.value, KmsProviders.KMIP.value, full_daemon_name
+            )
+
+            kms_config: List[KmsConfig] = []
+
+            if vault_config_data:
+                vault_config_data = _set_defaults_in_encryption_configs(
+                    vault_config_data, EncryptionTypes.KMS.value, KmsProviders.VAULT.value
+                )
+                kms_config.append(KmsConfig(vault=VaultConfig(**vault_config_data)))
+
+            if kmip_config_data:
+                kmip_config_data = _set_defaults_in_encryption_configs(
+                    kmip_config_data, EncryptionTypes.KMS.value, KmsProviders.KMIP.value
+                )
+                kms_config.append(KmsConfig(kmip=KmipConfig(**kmip_config_data)))
+
+            if kms_config:
+                encryption_config = encryption_config._replace(kms=kms_config)
+
+        # Fetch configuration for S3
+        if EncryptionTypes.S3.value:
+            s3_config_data: Optional[Dict[str, Any]] = _get_conf_keys(
+                list(VaultConfig._fields), VaultConfig.required_fields(),
+                EncryptionTypes.S3.value, KmsProviders.VAULT.value, full_daemon_name
+            )
+
+            s3_config: List[S3Config] = []
+            if s3_config_data:
+                s3_config_data = _set_defaults_in_encryption_configs(
+                    s3_config_data, EncryptionTypes.S3.value, KmsProviders.VAULT.value
+                )
+                s3_config.append(S3Config(vault=VaultConfig(**s3_config_data)))
+
+                encryption_config = encryption_config._replace(s3=s3_config)
+
+        return encryption_config.to_dict()
+
+    @classmethod
+    def set_encryption_config(cls, encryption_type: str, kms_provider: str,
+                              config: Union[VaultConfig, KmipConfig],
+                              daemon_name: str) -> None:
+        full_daemon_name = 'rgw.' + daemon_name
+
+        config_dict = config._asdict() if isinstance(config, (VaultConfig, KmipConfig)) else config
+
+        if isinstance(config_dict, dict):
+            if kms_provider == KmsProviders.VAULT.value:
+                config = VaultConfig(**config_dict)
+            elif kms_provider == KmsProviders.KMIP.value:
+                config = KmipConfig(**config_dict)
+
+        for field in config._fields:
+            value = getattr(config, field)
+            if value is None:
+                continue
+
+            if isinstance(value, bool):
+                value = str(value).lower()
+
+            key = _generate_key(encryption_type, kms_provider, field)
+
+            CephService.send_command('mon', 'config set',
+                                     who=name_to_config_section(full_daemon_name),
+                                     name=key, value=value)
+
+    @classmethod
+    def set_multisite_config(cls, realm_name, zonegroup_name, zone_name, daemon_name):
+        full_daemon_name = 'rgw.' + daemon_name
+
+        KMS_CONFIG = [
+            ['rgw_realm', realm_name],
+            ['rgw_zonegroup', zonegroup_name],
+            ['rgw_zone', zone_name]
+        ]
+
+        for (key, value) in KMS_CONFIG:
+            if value == 'null':
+                continue
+            CephService.send_command('mon', 'config set',
+                                     who=name_to_config_section(full_daemon_name),
+                                     name=key, value=value)
+        return {}
+
+    @classmethod
+    def get_realm_tokens(cls):
+        tokens_info = mgr.remote('rgw', 'get_realm_tokens')
+        return tokens_info
+
+    @classmethod
+    def import_realm_token(cls, realm_token, zone_name, port, placement_spec):
+        tokens_info = mgr.remote('rgw', 'import_realm_token', zone_name=zone_name,
+                                 realm_token=realm_token, port=port, placement=placement_spec,
+                                 start_radosgw=True)
+        return tokens_info
+
+    @classmethod
     def get_pool_pg_status(cls, pool_name):
         # type: (str) -> dict
         pool = cls.get_pool_by_attribute('pool_name', pool_name)
@@ -191,13 +304,14 @@ class CephService(object):
         return mgr.get("pg_summary")['by_pool'][pool['pool'].__str__()]
 
     @staticmethod
-    def send_command(srv_type, prefix, srv_spec='', **kwargs):
-        # type: (str, str, Optional[str], Any) -> Any
+    def send_command(srv_type, prefix, srv_spec='', to_json=True, inbuf='', **kwargs):
+        # type: (str, str, Optional[str], bool, str, Any) -> Any
         """
         :type prefix: str
         :param srv_type: mon |
         :param kwargs: will be added to argdict
         :param srv_spec: typically empty. or something like "<fs_id>:0"
+        :param to_json: if true return as json format
 
         :raises PermissionError: See rados.make_ex
         :raises ObjectNotFound: See rados.make_ex
@@ -212,11 +326,12 @@ class CephService(object):
         """
         argdict = {
             "prefix": prefix,
-            "format": "json",
         }
+        if to_json:
+            argdict["format"] = "json"
         argdict.update({k: v for k, v in kwargs.items() if v is not None})
         result = CommandResult("")
-        mgr.send_command(result, srv_type, srv_spec, json.dumps(argdict), "")
+        mgr.send_command(result, srv_type, srv_spec, json.dumps(argdict), "", inbuf=inbuf)
         r, outb, outs = result.wait()
         if r != 0:
             logger.error("send_command '%s' failed. (r=%s, outs=\"%s\", kwargs=%s)", prefix, r,
@@ -249,7 +364,7 @@ class CephService(object):
             # thus it is not relevant for us which daemon we are using.
             # NOTE: the list may contain daemons that are 'down' or 'destroyed'.
             for daemon in device['daemons']:
-                svc_type, svc_id = daemon.split('.')
+                svc_type, svc_id = daemon.split('.', 1)
                 if 'osd' in svc_type:
                     if daemon not in osd_daemons_up:
                         continue
@@ -270,17 +385,23 @@ class CephService(object):
                         continue
                 else:
                     dev_smart_data = {}
-                for dev_id, dev_data in dev_smart_data.items():
-                    if 'error' in dev_data:
-                        logger.warning(
-                            '[SMART] Error retrieving smartctl data for device ID "%s": %s',
-                            dev_id, dev_data)
+
+                CephService.log_dev_data_error(dev_smart_data)
+
                 break
 
             return dev_smart_data
         logger.warning('[SMART] No daemons associated with device ID "%s"',
                        device['devid'])
         return {}
+
+    @staticmethod
+    def log_dev_data_error(dev_smart_data):
+        for dev_id, dev_data in dev_smart_data.items():
+            if 'error' in dev_data:
+                logger.warning(
+                    '[SMART] Error retrieving smartctl data for device ID "%s": %s',
+                    dev_id, dev_data)
 
     @staticmethod
     def get_devices_by_host(hostname):
@@ -420,3 +541,40 @@ class CephService(object):
             'statuses': pg_summary['all'],
             'pgs_per_osd': pgs_per_osd,
         }
+
+
+def _generate_key(encryption_type: str, backend: str, config_name: str):
+    if encryption_type == EncryptionTypes.KMS.value:
+        return f'rgw_crypt_{backend}_{config_name}'
+
+    if encryption_type == EncryptionTypes.S3.value:
+        return f'rgw_crypt_sse_s3_{backend}_{config_name}'
+    return None
+
+
+def _get_conf_keys(fields: List[str], req_fields: List[str], encryption_type: str,
+                   backend: str, daemon_name: str) -> Dict[str, Any]:
+    config: Dict[str, Any] = {}
+
+    for field in fields:
+        key = _generate_key(encryption_type, backend, field)
+        try:
+            value = CephService.send_command('mon', 'config get',
+                                             who=name_to_config_section(daemon_name), key=key)
+            if field in req_fields and not (isinstance(value, str) and value.strip()):
+                config = {}
+                break
+
+            config[field] = value.strip() if isinstance(value, str) else value
+        except Exception as e:  # pylint: disable=broad-except
+            logger.exception('Error %s while fetching configuration for %s', e, key)
+    return config
+
+
+def _set_defaults_in_encryption_configs(config: Dict[str, Any],
+                                        encryption_type: str,
+                                        kms_provider: str) -> Dict[str, Any]:
+    config['backend'] = kms_provider
+    config['encryption_type'] = encryption_type
+    config['unique_id'] = f'{encryption_type}-{kms_provider}'
+    return config

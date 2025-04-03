@@ -16,10 +16,13 @@
 #include "include/scope_guard.h"
 #include "include/stringify.h"
 #include "common/Checksummer.h"
+#include "common/config_proxy.h" // for class ConfigProxy
 #include "mds/mdstypes.h"
 #include "global/global_context.h"
 #include "test/librados/testcase_cxx.h"
 #include "test/librados/test_cxx.h"
+
+#include "crimson_utils.h"
 
 using namespace std;
 using namespace librados;
@@ -48,6 +51,7 @@ TEST_F(LibRadosMiscPP, LongNamePP) {
 }
 
 TEST_F(LibRadosMiscPP, LongLocatorPP) {
+  SKIP_IF_CRIMSON();
   bufferlist bl;
   bl.append("content");
   int maxlen = g_conf()->osd_max_object_name_len;
@@ -381,6 +385,7 @@ TEST_F(LibRadosMiscPP, BigAttrPP) {
 }
 
 TEST_F(LibRadosMiscPP, CopyPP) {
+  SKIP_IF_CRIMSON();
   bufferlist bl, x;
   bl.append("hi there");
   x.append("bar");
@@ -470,6 +475,7 @@ public:
   ~LibRadosTwoPoolsECPP() override {};
 protected:
   static void SetUpTestCase() {
+    SKIP_IF_CRIMSON();
     pool_name = get_temp_pool_name();
     ASSERT_EQ("", create_one_ec_pool_pp(pool_name, s_cluster));
     src_pool_name = get_temp_pool_name();
@@ -484,17 +490,20 @@ protected:
     src_ioctx.application_enable("rados", true);
   }
   static void TearDownTestCase() {
+    SKIP_IF_CRIMSON();
     ASSERT_EQ(0, s_cluster.pool_delete(src_pool_name.c_str()));
     ASSERT_EQ(0, destroy_one_ec_pool_pp(pool_name, s_cluster));
   }
   static std::string src_pool_name;
 
   void SetUp() override {
+    SKIP_IF_CRIMSON();
     RadosTestECPP::SetUp();
     ASSERT_EQ(0, cluster.ioctx_create(src_pool_name.c_str(), src_ioctx));
     src_ioctx.set_namespace(nspace);
   }
   void TearDown() override {
+    SKIP_IF_CRIMSON();
     // wait for maps to settle before next test
     cluster.wait_for_latest_osdmap();
 
@@ -512,6 +521,7 @@ std::string LibRadosTwoPoolsECPP::src_pool_name;
 
 //copy_from between ecpool and no-ecpool.
 TEST_F(LibRadosTwoPoolsECPP, CopyFrom) {
+  SKIP_IF_CRIMSON();
   bufferlist z;
   z.append_zero(4194304*2);
   bufferlist b;
@@ -538,6 +548,7 @@ TEST_F(LibRadosTwoPoolsECPP, CopyFrom) {
 }
 
 TEST_F(LibRadosMiscPP, CopyScrubPP) {
+  SKIP_IF_CRIMSON();
   bufferlist inbl, bl, x;
   for (int i=0; i<100; ++i)
     x.append("barrrrrrrrrrrrrrrrrrrrrrrrrr");
@@ -858,6 +869,7 @@ TEST_F(LibRadosMiscPP, Applications) {
 }
 
 TEST_F(LibRadosMiscECPP, CompareExtentRange) {
+  SKIP_IF_CRIMSON();
   bufferlist bl1;
   bl1.append("ceph");
   ObjectWriteOperation write;

@@ -4,16 +4,18 @@
 #ifndef CEPH_CLS_RBD_TYPES_H
 #define CEPH_CLS_RBD_TYPES_H
 
-#include <boost/variant.hpp>
 #include "include/int_types.h"
 #include "include/buffer.h"
 #include "include/encoding.h"
+#include "include/object.h" // for snapid_t
 #include "include/stringify.h"
 #include "include/utime.h"
 #include "msg/msg_types.h"
 #include <iosfwd>
+#include <map>
 #include <string>
 #include <set>
+#include <variant>
 
 #define RBD_GROUP_REF "rbd_group_ref"
 
@@ -44,9 +46,10 @@ inline void decode(DirectoryState &state, ceph::buffer::list::const_iterator& it
 }
 
 enum MirrorMode {
-  MIRROR_MODE_DISABLED = 0,
-  MIRROR_MODE_IMAGE    = 1,
-  MIRROR_MODE_POOL     = 2
+  MIRROR_MODE_DISABLED  = 0,
+  MIRROR_MODE_IMAGE     = 1,
+  MIRROR_MODE_POOL      = 2,
+  MIRROR_MODE_INIT_ONLY = 3
 };
 
 enum GroupImageLinkState {
@@ -374,6 +377,7 @@ struct GroupImageSpec {
 
   std::string image_key();
 
+  bool operator==(const GroupImageSpec&) const = default;
 };
 WRITE_CLASS_ENCODER(GroupImageSpec);
 
@@ -442,6 +446,10 @@ struct UserSnapshotNamespace {
     return true;
   }
 
+  inline bool operator!=(const UserSnapshotNamespace& usn) const {
+    return false;
+  }
+
   inline bool operator<(const UserSnapshotNamespace& usn) const {
     return false;
   }
@@ -472,6 +480,10 @@ struct GroupSnapshotNamespace {
     return group_pool == gsn.group_pool &&
 	   group_id == gsn.group_id &&
 	   group_snapshot_id == gsn.group_snapshot_id;
+  }
+
+  inline bool operator!=(const GroupSnapshotNamespace& gsn) const {
+    return !operator==(gsn);
   }
 
   inline bool operator<(const GroupSnapshotNamespace& gsn) const {
@@ -505,6 +517,9 @@ struct TrashSnapshotNamespace {
 
   inline bool operator==(const TrashSnapshotNamespace& usn) const {
     return true;
+  }
+  inline bool operator!=(const TrashSnapshotNamespace& usn) const {
+    return false;
   }
   inline bool operator<(const TrashSnapshotNamespace& usn) const {
     return false;
@@ -611,6 +626,10 @@ struct MirrorSnapshotNamespace {
            snap_seqs == rhs.snap_seqs;
   }
 
+  inline bool operator!=(const MirrorSnapshotNamespace& rhs) const {
+    return !operator==(rhs);
+  }
+
   inline bool operator<(const MirrorSnapshotNamespace& rhs) const {
     if (state != rhs.state) {
       return state < rhs.state;
@@ -644,6 +663,10 @@ struct UnknownSnapshotNamespace {
     return true;
   }
 
+  inline bool operator!=(const UnknownSnapshotNamespace& gsn) const {
+    return false;
+  }
+
   inline bool operator<(const UnknownSnapshotNamespace& gsn) const {
     return false;
   }
@@ -656,37 +679,32 @@ std::ostream& operator<<(std::ostream& os, const TrashSnapshotNamespace& ns);
 std::ostream& operator<<(std::ostream& os, const MirrorSnapshotNamespace& ns);
 std::ostream& operator<<(std::ostream& os, const UnknownSnapshotNamespace& ns);
 
-typedef boost::variant<UserSnapshotNamespace,
-                       GroupSnapshotNamespace,
-                       TrashSnapshotNamespace,
-                       MirrorSnapshotNamespace,
-                       UnknownSnapshotNamespace> SnapshotNamespaceVariant;
+typedef std::variant<UserSnapshotNamespace,
+		     GroupSnapshotNamespace,
+		     TrashSnapshotNamespace,
+		     MirrorSnapshotNamespace,
+		     UnknownSnapshotNamespace> SnapshotNamespaceVariant;
 
 struct SnapshotNamespace : public SnapshotNamespaceVariant {
-  SnapshotNamespace() {
-  }
-
-  template <typename T>
-  SnapshotNamespace(T&& t) : SnapshotNamespaceVariant(std::forward<T>(t)) {
-  }
+  using SnapshotNamespaceVariant::SnapshotNamespaceVariant;
 
   void encode(ceph::buffer::list& bl) const;
   void decode(ceph::buffer::list::const_iterator& it);
   void dump(ceph::Formatter *f) const;
 
+  template <typename F>
+  decltype(auto) visit(F&& f) const & {
+    return std::visit(std::forward<F>(f), static_cast<const SnapshotNamespaceVariant&>(*this));
+  }
+  template <typename F>
+  decltype(auto) visit(F&& f) & {
+    return std::visit(std::forward<F>(f), static_cast<SnapshotNamespaceVariant&>(*this));
+  }
   static void generate_test_instances(std::list<SnapshotNamespace*> &o);
-
-  inline bool operator==(const SnapshotNamespaceVariant& sn) const {
-    return static_cast<const SnapshotNamespaceVariant&>(*this) == sn;
-  }
-  inline bool operator<(const SnapshotNamespaceVariant& sn) const {
-    return static_cast<const SnapshotNamespaceVariant&>(*this) < sn;
-  }
-  inline bool operator!=(const SnapshotNamespaceVariant& sn) const {
-    return !(*this == sn);
-  }
 };
 WRITE_CLASS_ENCODER(SnapshotNamespace);
+
+std::ostream& operator<<(std::ostream& os, const SnapshotNamespace& ns);
 
 SnapshotNamespaceType get_snap_namespace_type(
     const SnapshotNamespace& snapshot_namespace);
@@ -871,6 +889,7 @@ struct TrashImageSpec {
             deferment_end_time == rhs.deferment_end_time);
   }
 };
+
 WRITE_CLASS_ENCODER(TrashImageSpec);
 
 struct MirrorImageMap {

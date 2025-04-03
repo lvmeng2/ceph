@@ -5,16 +5,14 @@
 
 #include "common/static_ptr.h"
 
-#include "rgw/rgw_service.h"
+#include "rgw_service.h"
 
-#include "svc_rados.h"
 #include "svc_sys_obj_types.h"
 #include "svc_sys_obj_core_types.h"
 
 
 class RGWSI_Zone;
 class RGWSI_SysObj;
-class RGWSysObjectCtx;
 
 struct rgw_cache_entry_info;
 
@@ -27,21 +25,11 @@ public:
     friend class ROp;
 
     RGWSI_SysObj_Core *core_svc;
-    RGWSysObjectCtx& ctx;
     rgw_raw_obj obj;
 
   public:
-    Obj(RGWSI_SysObj_Core *_core_svc,
-        RGWSysObjectCtx& _ctx,
-        const rgw_raw_obj& _obj) : core_svc(_core_svc),
-                                   ctx(_ctx),
-                                   obj(_obj) {}
-
-    void invalidate();
-
-    RGWSysObjectCtx& get_ctx() {
-      return ctx;
-    }
+    Obj(RGWSI_SysObj_Core *_core_svc, const rgw_raw_obj& _obj)
+        : core_svc(_core_svc), obj(_obj) {}
 
     rgw_raw_obj& get_obj() {
       return obj;
@@ -119,13 +107,13 @@ public:
         return *this;
       }
 
-      WOp& set_attrs(std::map<std::string, bufferlist>& _attrs) {
+      WOp& set_attrs(const std::map<std::string, bufferlist>& _attrs) {
         attrs = _attrs;
         return *this;
       }
 
       WOp& set_attrs(std::map<std::string, bufferlist>&& _attrs) {
-        attrs = _attrs;
+        attrs = std::move(_attrs);
         return *this;
       }
 
@@ -257,20 +245,19 @@ public:
   friend class Pool::Op;
 
 protected:
-  RGWSI_RADOS *rados_svc{nullptr};
+  librados::Rados* rados{nullptr};
   RGWSI_SysObj_Core *core_svc{nullptr};
 
-  void init(RGWSI_RADOS *_rados_svc,
+  void init(librados::Rados* rados_,
             RGWSI_SysObj_Core *_core_svc) {
-    rados_svc = _rados_svc;
+    rados = rados_;
     core_svc = _core_svc;
   }
 
 public:
   RGWSI_SysObj(CephContext *cct): RGWServiceInstance(cct) {}
 
-  RGWSysObjectCtx init_obj_ctx();
-  Obj get_obj(RGWSysObjectCtx& obj_ctx, const rgw_raw_obj& obj);
+  Obj get_obj(const rgw_raw_obj& obj);
 
   Pool get_pool(const rgw_pool& pool) {
     return Pool(core_svc, pool);
@@ -280,14 +267,3 @@ public:
 };
 
 using RGWSysObj = RGWSI_SysObj::Obj;
-
-class RGWSysObjectCtx : public RGWSysObjectCtxBase
-{
-  RGWSI_SysObj *sysobj_svc;
-public:
-  RGWSysObjectCtx(RGWSI_SysObj *_sysobj_svc) : sysobj_svc(_sysobj_svc) {}
-
-  RGWSI_SysObj::Obj get_obj(const rgw_raw_obj& obj) {
-    return sysobj_svc->get_obj(*this, obj);
-  }
-};

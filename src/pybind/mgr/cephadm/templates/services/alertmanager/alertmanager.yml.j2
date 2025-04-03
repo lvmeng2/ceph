@@ -3,6 +3,17 @@
 
 global:
   resolve_timeout: 5m
+{% if not secure %}
+  http_config:
+    tls_config:
+{% if security_enabled %}
+      ca_file: root_cert.pem
+      cert_file: alertmanager.crt
+      key_file: alertmanager.key
+{% else %}
+      insecure_skip_verify: true
+{% endif %}
+{% endif %}
 
 route:
   receiver: 'default'

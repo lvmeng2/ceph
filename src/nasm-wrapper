@@ -10,7 +10,7 @@ while [ -n "$*" ]; do
         refine_nasm_options+=" -f $1"
         shift
         ;;
-    -c | --param* | -m* | -pipe | -thread )
+    -c | --param* | --coverage | -m* | -pipe | -thread )
         # unknown options under nasm & yasm
         shift
         ;;
@@ -35,6 +35,10 @@ while [ -n "$*" ]; do
     -I | -isystem )
         shift
         refine_nasm_options+=" -i $1"
+        shift
+        ;;
+    -O* )
+        # ignore C optimisations
         shift
         ;;
     * )

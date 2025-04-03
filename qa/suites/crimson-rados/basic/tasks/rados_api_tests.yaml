@@ -19,9 +19,10 @@ overrides:
       osd:
         osd class load list: "*"
         osd class default list: "*"
+        osd blocked scrub grace period: 3600
 tasks:
 - workunit:
     clients:
       client.0:
-        - rados/test.sh
+        - rados/test.sh --crimson
         - rados/test_pool_quota.sh

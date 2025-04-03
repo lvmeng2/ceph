@@ -31,7 +31,7 @@ function(add_options name)
   set(options_yamls ${options_yamls} PARENT_SCOPE)
   set(cc_file "${name}_options.cc")
   set(h_file "${PROJECT_BINARY_DIR}/include/${name}_legacy_options.h")
-  add_custom_command(PRE_BUILD
+  add_custom_command(
     OUTPUT ${cc_file} ${h_file}
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/y2c.py
       --input ${yaml_file}
@@ -76,7 +76,7 @@ endif()
 set(mgr_disabled_modules "")
 if(WITH_MGR)
   # https://tracker.ceph.com/issues/45147
-  if(Python3_VERSION VERSION_GREATER_EQUAL 3.8)
+  if(Python3_VERSION VERSION_EQUAL 3.8)
     set(mgr_disabled_modules "diskprediction_local")
     message(STATUS "mgr module disabled for ${Python3_VERSION}: ${mgr_disabled_modules}")
   endif()
@@ -93,6 +93,7 @@ add_options(osd)
 add_options(rbd)
 add_options(rbd-mirror)
 add_options(immutable-object-cache)
+add_options(ceph-exporter)
 
 # if set to empty string, system default luarocks package location (if exist) will be used
 set(rgw_luarocks_location "")
@@ -103,8 +104,10 @@ add_options(rgw)
 
 add_library(common-options-objs OBJECT
   ${common_options_srcs})
-add_custom_target(legacy-option-headers
-  DEPENDS ${legacy_options_headers})
+add_library(legacy-option-headers INTERFACE)
+target_sources(legacy-option-headers
+  PRIVATE
+    ${legacy_options_headers})
 
 include(AddCephTest)
 add_ceph_test(validate-options

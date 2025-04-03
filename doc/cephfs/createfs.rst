@@ -15,6 +15,10 @@ There are important considerations when planning these pools:
 - We recommend the fastest feasible low-latency storage devices (NVMe, Optane,
   or at the very least SAS/SATA SSD) for the metadata pool, as this will
   directly affect the latency of client file system operations.
+- We strongly suggest that the CephFS metadata pool be provisioned on dedicated
+  SSD / NVMe OSDs. This ensures that high client workload does not adversely
+  impact metadata operations. See :ref:`device_classes` to configure pools this
+  way.
 - The data pool used to create the file system is the "default" data pool and
   the location for storing all inode backtrace information, which is used for hard link
   management and disaster recovery. For this reason, all CephFS inodes
@@ -48,13 +52,47 @@ Once the pools are created, you may enable the file system using the ``fs new`` 
 
 .. code:: bash
 
-    $ ceph fs new <fs_name> <metadata> <data>
+    $ ceph fs new <fs_name> <metadata> <data> [--force] [--allow-dangerous-metadata-overlay] [<fscid:int>] [--recover] [--yes-i-really-really-mean-it] [<set>...]
+
+This command creates a new file system with specified metadata and data pool.
+The specified data pool is the default data pool and cannot be changed once set.
+Each file system has its own set of MDS daemons assigned to ranks so ensure that
+you have sufficient standby daemons available to accommodate the new file system.
+
+.. note::
+   ``--yes-i-really-really-mean-it`` may be used for some ``fs set`` commands
+
+The ``--force`` option is used to achieve any of the following:
+
+- To set an erasure-coded pool for the default data pool. Use of an EC pool for the
+  default data pool is discouraged. Refer to `Creating pools`_ for details.
+- To set non-empty pool (pool already contains some objects) for the metadata pool.
+- To create a file system with a specific file system's ID (fscid).
+  The --force option is required with --fscid option.
+
+The ``--allow-dangerous-metadata-overlay`` option permits the reuse metadata and
+data pools if it is already in-use. This should only be done in emergencies and
+after careful reading of the documentation.
+
+If the ``--fscid`` option is provided then this creates a file system with a
+specific fscid. This can be used when an application expects the file system's ID
+to be stable after it has been recovered, e.g., after monitor databases are
+lost and rebuilt. Consequently, file system IDs don't always keep increasing
+with newer file systems.
+
+The ``--recover`` option sets the state of file system's rank 0 to existing but
+failed. So when a MDS daemon eventually picks up rank 0, the daemon reads the
+existing in-RADOS metadata and doesn't overwrite it. The flag also prevents the
+standby MDS daemons to join the file system.
+
+The ``set`` option allows to set multiple options supported by ``fs set``
+atomically with the creation of the file system.
 
 For example:
 
 .. code:: bash
 
-    $ ceph fs new cephfs cephfs_metadata cephfs_data
+    $ ceph fs new cephfs cephfs_metadata cephfs_data set max_mds 2 allow_standby_replay true
     $ ceph fs ls
     name: cephfs, metadata pool: cephfs_metadata, data pools: [cephfs_data ]
 
@@ -80,7 +118,7 @@ choose which to use when mounting.
 
 If you have created more than one file system, and a client does not
 specify a file system when mounting, you can control which file system
-they will see by using the `ceph fs set-default` command.
+they will see by using the ``ceph fs set-default`` command.
 
 Adding a Data Pool to the File System 
 -------------------------------------

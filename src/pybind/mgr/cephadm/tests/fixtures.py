@@ -28,11 +28,18 @@ def get_ceph_option(_, key):
     return __file__
 
 
-def _run_cephadm(ret):
+def get_module_option_ex(_, module, key, default=None):
+    if module == 'prometheus':
+        if key == 'server_port':
+            return 9283
+    return None
+
+
+def _run_cephadm(ret, rc: int = 0):
     async def foo(s, host, entity, cmd, e, **kwargs):
         if cmd == 'gather-facts':
             return '{}', '', 0
-        return [ret], '', 0
+        return [ret], '', rc
     return foo
 
 
@@ -43,7 +50,7 @@ def match_glob(val, pat):
 
 
 class MockEventLoopThread:
-    def get_result(self, coro):
+    def get_result(self, coro, timeout):
         if sys.version_info >= (3, 7):
             return asyncio.run(coro)
 
@@ -83,14 +90,20 @@ def with_cephadm_module(module_options=None, store=None):
     :param module_options: Set opts as if they were set before module.__init__ is called
     :param store: Set the store before module.__init__ is called
     """
-    with mock.patch("cephadm.module.CephadmOrchestrator.get_ceph_option", get_ceph_option),\
+    with mock.patch("cephadm.module.CephadmOrchestrator.get_ceph_option", get_ceph_option), \
             mock.patch("cephadm.services.osd.RemoveUtil._run_mon_cmd"), \
+            mock.patch('cephadm.module.CephadmOrchestrator.get_module_option_ex', get_module_option_ex), \
             mock.patch("cephadm.module.CephadmOrchestrator.get_osdmap"), \
             mock.patch("cephadm.module.CephadmOrchestrator.remote"), \
+            mock.patch("cephadm.module.CephadmOrchestrator.get_fqdn", lambda a, b: 'host_fqdn'), \
+            mock.patch("cephadm.module.CephadmOrchestrator.get_mgr_ip", lambda _: '::1'), \
             mock.patch("cephadm.agent.CephadmAgentHelpers._request_agent_acks"), \
             mock.patch("cephadm.agent.CephadmAgentHelpers._apply_agent", return_value=False), \
             mock.patch("cephadm.agent.CephadmAgentHelpers._agent_down", return_value=False), \
-            mock.patch('cephadm.agent.CherryPyThread.run'):
+            mock.patch('cephadm.offline_watcher.OfflineHostWatcher.run'), \
+            mock.patch('cephadm.tuned_profiles.TunedProfileUtils._remove_stray_tuned_profiles'), \
+            mock.patch('cephadm.offline_watcher.OfflineHostWatcher.run'), \
+            mock.patch('cephadm.http_server.CephadmHttpServer.run'):
 
         m = CephadmOrchestrator.__new__(CephadmOrchestrator)
         if module_options is not None:
@@ -123,8 +136,7 @@ def with_cephadm_module(module_options=None, store=None):
         yield m
 
 
-def wait(m, c):
-    # type: (CephadmOrchestrator, OrchResult) -> Any
+def wait(m: CephadmOrchestrator, c: OrchResult) -> Any:
     return raise_if_exception(c)
 
 

@@ -4,11 +4,12 @@ from unittest import mock
 
 import pytest
 
-from tests.fixtures import with_cephadm_ctx, cephadm_fs
+from tests.fixtures import with_cephadm_ctx, cephadm_fs, import_cephadm
 
-with mock.patch('builtins.open', create=True):
-    from importlib.machinery import SourceFileLoader
-    cd = SourceFileLoader('cephadm', 'cephadm').load_module()
+from cephadmlib.host_facts import _parse_ipv4_route, _parse_ipv6_route
+from cephadmlib.net_utils import get_ipv6_address
+
+_cephadm = import_cephadm()
 
 
 class TestCommandListNetworks:
@@ -24,6 +25,8 @@ class TestCommandListNetworks:
             139.1.0.0/16 via 10.4.0.1 dev tun0 proto static metric 50
             140.1.0.0/17 via 10.4.0.1 dev tun0 proto static metric 50
             141.1.0.0/16 via 10.4.0.1 dev tun0 proto static metric 50
+            172.16.100.34 via 172.16.100.34 dev eth1 proto kernel scope link src 172.16.100.34
+            192.168.122.1 dev ens3 proto dhcp scope link src 192.168.122.236 metric 100
             169.254.0.0/16 dev docker0 scope link metric 1000
             172.17.0.0/16 dev docker0 proto kernel scope link src 172.17.0.1
             192.168.39.0/24 dev virbr1 proto kernel scope link src 192.168.39.1 linkdown
@@ -33,7 +36,9 @@ class TestCommandListNetworks:
             195.135.221.12 via 192.168.178.1 dev enxd89ef3f34260 proto static metric 100
             """),
             {
-                '10.4.0.1': {'tun0': {'10.4.0.2'}},
+                '172.16.100.34/32': {'eth1': {'172.16.100.34'}},
+                '192.168.122.1/32': {'ens3': {'192.168.122.236'}},
+                '10.4.0.1/32': {'tun0': {'10.4.0.2'}},
                 '172.17.0.0/16': {'docker0': {'172.17.0.1'}},
                 '192.168.39.0/24': {'virbr1': {'192.168.39.1'}},
                 '192.168.122.0/24': {'virbr0': {'192.168.122.1'}},
@@ -61,13 +66,13 @@ class TestCommandListNetworks:
             {
                 '10.3.64.0/24': {'eno1': {'10.3.64.23', '10.3.64.27'}},
                 '10.88.0.0/16': {'cni-podman0': {'10.88.0.1'}},
-                '172.21.3.1': {'tun0': {'172.21.3.2'}},
+                '172.21.3.1/32': {'tun0': {'172.21.3.2'}},
                 '192.168.122.0/24': {'virbr0': {'192.168.122.1'}}
             }
         ),
     ])
     def test_parse_ipv4_route(self, test_input, expected):
-        assert cd._parse_ipv4_route(test_input) == expected
+        assert _parse_ipv4_route(test_input) == expected
 
     @pytest.mark.parametrize("test_routes, test_ips, expected", [
         (
@@ -175,10 +180,13 @@ class TestCommandListNetworks:
                    valid_lft forever preferred_lft forever
             """),
             {
-                '2001:1458:301:eb::/64': {
+                '2001:1458:301:eb::100:1a/128': {
                     'ens20f0': {
                         '2001:1458:301:eb::100:1a'
                     },
+                },
+                '2001:1458:301:eb::/64': {
+                    'ens20f0': set(),
                 },
                 'fe80::/64': {
                     'ens20f0': {'fe80::2e60:cff:fef8:da41'},
@@ -217,12 +225,28 @@ class TestCommandListNetworks:
         ),
     ])
     def test_parse_ipv6_route(self, test_routes, test_ips, expected):
-        assert cd._parse_ipv6_route(test_routes, test_ips) == expected
+        assert _parse_ipv6_route(test_routes, test_ips) == expected
 
-    @mock.patch.object(cd, 'call_throws', return_value=('10.4.0.1 dev tun0 proto kernel scope link src 10.4.0.2 metric 50\n', '', ''))
-    def test_command_list_networks(self, cephadm_fs, capsys):
+    @mock.patch('cephadmlib.net_utils.read_file')
+    def test_get_ipv6_addr(self, _read_file):
+        proc_net_if_net6 = """fe80000000000000505400fffe347999 02 40 20 80     eth0
+fe80000000000000505400fffe04c154 03 40 20 80     eth1
+00000000000000000000000000000001 01 80 10 80       lo"""
+        _read_file.return_value = proc_net_if_net6
+
+        ipv6_addr = get_ipv6_address('eth0')
+        assert ipv6_addr == 'fe80::5054:ff:fe34:7999/64'
+
+        ipv6_addr = get_ipv6_address('eth1')
+        assert ipv6_addr == 'fe80::5054:ff:fe04:c154/64'
+
+    @mock.patch('cephadmlib.host_facts.call_throws')
+    @mock.patch('cephadmlib.host_facts.find_executable')
+    def test_command_list_networks(self, _find_exe, _call_throws, cephadm_fs, capsys):
+        _call_throws.return_value = ('10.4.0.1 dev tun0 proto kernel scope link src 10.4.0.2 metric 50\n', '', '')
+        _find_exe.return_value = 'ip'
         with with_cephadm_ctx([]) as ctx:
-            cd.command_list_networks(ctx)
+            _cephadm.command_list_networks(ctx)
             assert json.loads(capsys.readouterr().out) == {
-                '10.4.0.1': {'tun0': ['10.4.0.2']}
+                '10.4.0.1/32': {'tun0': ['10.4.0.2']}
             }

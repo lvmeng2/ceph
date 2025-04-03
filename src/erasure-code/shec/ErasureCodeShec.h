@@ -69,7 +69,7 @@ public:
     return k;
   }
 
-  unsigned int get_chunk_size(unsigned int object_size) const override;
+  unsigned int get_chunk_size(unsigned int stripe_width) const override;
 
   int _minimum_to_decode(const std::set<int> &want_to_read,
 			 const std::set<int> &available_chunks,
@@ -139,6 +139,10 @@ public:
 			  char **coding,
 			  int blocksize) override;
   unsigned get_alignment() const override;
+  size_t get_minimum_granularity() override
+  {
+    return 1;
+  }
   void prepare() override;
 private:
   int parse(const ceph::ErasureCodeProfile &profile) override;

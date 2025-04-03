@@ -7,19 +7,21 @@
 
 #include "crimson/net/Connection.h"
 #include "crimson/osd/osd_operation.h"
+#include "crimson/osd/recovery_backend.h"
 #include "crimson/common/type_helpers.h"
-
-#include "messages/MOSDOp.h"
+#include "crimson/osd/osd_operations/peering_event.h"
+#include "crimson/osd/pg.h"
 
 namespace crimson::osd {
 class PG;
 class ShardServices;
 
-class BackgroundRecovery : public OperationT<BackgroundRecovery> {
+template <class T>
+class BackgroundRecoveryT : public PhasedOperationT<T> {
 public:
   static constexpr OperationTypeCode type = OperationTypeCode::background_recovery;
 
-  BackgroundRecovery(
+  BackgroundRecoveryT(
     Ref<PG> pg,
     ShardServices &ss,
     epoch_t epoch_started,
@@ -42,29 +44,31 @@ private:
       scheduler_class
     };
   }
-  virtual interruptible_future<bool> do_recovery() = 0;
+  using do_recovery_ret_t = typename PhasedOperationT<T>::template interruptible_future<bool>;
+  virtual do_recovery_ret_t do_recovery() = 0;
   ShardServices &ss;
   const crimson::osd::scheduler::scheduler_class_t scheduler_class;
 };
 
 /// represent a recovery initiated for serving a client request
 ///
-/// unlike @c PglogBasedRecovery and @c BackfillRecovery,
-/// @c UrgentRecovery is not throttled by the scheduler. and it
-/// utilizes @c RecoveryBackend directly to recover the unreadable
-/// object.
-class UrgentRecovery final : public BackgroundRecovery {
+/// unlike @c PglogBasedRecovery, @c UrgentRecovery is not throttled
+/// by the scheduler. and it utilizes @c RecoveryBackend directly to
+/// recover the unreadable object.
+class UrgentRecovery final : public BackgroundRecoveryT<UrgentRecovery> {
 public:
   UrgentRecovery(
     const hobject_t& soid,
     const eversion_t& need,
     Ref<PG> pg,
     ShardServices& ss,
-    epoch_t epoch_started)
-  : BackgroundRecovery{pg, ss, epoch_started,
-                       crimson::osd::scheduler::scheduler_class_t::immediate},
-    soid{soid}, need(need) {}
+    epoch_t epoch_started);
   void print(std::ostream&) const final;
+
+  std::tuple<
+    OperationThrottler::BlockingEvent,
+    RecoveryBackend::RecoveryBlockingEvent
+  > tracking_events;
 
 private:
   void dump_detail(Formatter* f) const final;
@@ -73,7 +77,7 @@ private:
   const eversion_t need;
 };
 
-class PglogBasedRecovery final : public BackgroundRecovery {
+class PglogBasedRecovery final : public BackgroundRecoveryT<PglogBasedRecovery> {
 public:
   PglogBasedRecovery(
     Ref<PG> pg,
@@ -81,48 +85,31 @@ public:
     epoch_t epoch_started,
     float delay = 0);
 
+  std::tuple<
+    OperationThrottler::BlockingEvent,
+    RecoveryBackend::RecoveryBlockingEvent
+  > tracking_events;
+
+  void cancel() {
+    cancelled = true;
+  }
+
+  bool is_cancelled() const {
+    return cancelled;
+  }
+
+  epoch_t get_epoch_started() const {
+    return epoch_started;
+  }
 private:
   interruptible_future<bool> do_recovery() override;
+  bool cancelled = false;
 };
-
-class BackfillRecovery final : public BackgroundRecovery {
-public:
-  class BackfillRecoveryPipeline {
-    OrderedExclusivePhase process = {
-      "BackfillRecovery::PGPipeline::process"
-    };
-    friend class BackfillRecovery;
-    friend class PeeringEvent;
-  };
-
-  template <class EventT>
-  BackfillRecovery(
-    Ref<PG> pg,
-    ShardServices &ss,
-    epoch_t epoch_started,
-    const EventT& evt);
-
-  static BackfillRecoveryPipeline &bp(PG &pg);
-
-private:
-  boost::intrusive_ptr<const boost::statechart::event_base> evt;
-  PipelineHandle handle;
-  interruptible_future<bool> do_recovery() override;
-};
-
-template <class EventT>
-BackfillRecovery::BackfillRecovery(
-  Ref<PG> pg,
-  ShardServices &ss,
-  const epoch_t epoch_started,
-  const EventT& evt)
-  : BackgroundRecovery(
-      std::move(pg),
-      ss,
-      epoch_started,
-      crimson::osd::scheduler::scheduler_class_t::background_best_effort),
-    evt(evt.intrusive_from_this())
-{}
-
 
 }
+
+#if FMT_VERSION >= 90000
+template <> struct fmt::formatter<crimson::osd::PglogBasedRecovery> : fmt::ostream_formatter {};
+template <> struct fmt::formatter<crimson::osd::UrgentRecovery> : fmt::ostream_formatter {};
+template <class T> struct fmt::formatter<crimson::osd::BackgroundRecoveryT<T>> : fmt::ostream_formatter {};
+#endif

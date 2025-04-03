@@ -36,7 +36,7 @@
 #include "MDSMap.h"
 #include "MDSRank.h"
 
-#define CEPH_MDS_PROTOCOL    36 /* cluster internal */
+#define CEPH_MDS_PROTOCOL    37 /* cluster internal */
 
 class Messenger;
 class MonClient;
@@ -101,7 +101,7 @@ class MDSDaemon : public Dispatcher {
     const cmdmap_t& cmdmap,
     Formatter *f,
     const bufferlist &inbl,
-    std::function<void(int,const std::string&,bufferlist&)> on_finish);
+    asok_finisher on_finish);
 
   void dump_status(Formatter *f);
 
@@ -145,8 +145,8 @@ class MDSDaemon : public Dispatcher {
   class MDSSocketHook *asok_hook = nullptr;
 
  private:
-  bool ms_dispatch2(const ref_t<Message> &m) override;
-  int ms_handle_authentication(Connection *con) override;
+  Dispatcher::dispatch_result_t ms_dispatch2(const ref_t<Message> &m) override;
+  bool ms_handle_fast_authentication(Connection *con) override;
   void ms_handle_accept(Connection *con) override;
   void ms_handle_connect(Connection *con) override;
   bool ms_handle_reset(Connection *con) override;

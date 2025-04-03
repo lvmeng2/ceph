@@ -99,6 +99,17 @@ void PurgeItem::decode(bufferlist::const_iterator &p)
   DECODE_FINISH(p);
 }
 
+void PurgeItem::generate_test_instances(std::list<PurgeItem*>& ls) {
+  ls.push_back(new PurgeItem());
+  ls.push_back(new PurgeItem());
+  ls.back()->action = PurgeItem::PURGE_FILE;
+  ls.back()->ino = 1;
+  ls.back()->size = 2;
+  ls.back()->layout = file_layout_t();
+  ls.back()->old_pools = {1, 2};
+  ls.back()->snapc = SnapContext();
+  ls.back()->stamp = utime_t(3, 4);
+}
 // if Objecter has any slow requests, take that as a hint and
 // slow down our rate of purging
 PurgeQueue::PurgeQueue(
@@ -111,7 +122,7 @@ PurgeQueue::PurgeQueue(
     cct(cct_),
     rank(rank_),
     metadata_pool(metadata_pool_),
-    finisher(cct, "PurgeQueue", "PQ_Finisher"),
+    finisher(cct, "PurgeQueue", "mds-pq-fin"),
     timer(cct, lock),
     filer(objecter_, &finisher),
     objecter(objecter_),
@@ -138,6 +149,8 @@ void PurgeQueue::create_logger()
 {
   PerfCountersBuilder pcb(g_ceph_context, "purge_queue", l_pq_first, l_pq_last);
 
+  pcb.add_u64_counter(l_pq_executed_ops, "pq_executed_ops", "Purge queue ops executed",
+                      "puro", PerfCountersBuilder::PRIO_INTERESTING);
   pcb.add_u64_counter(l_pq_executed, "pq_executed", "Purge queue tasks executed",
                       "purg", PerfCountersBuilder::PRIO_INTERESTING);
 
@@ -212,7 +225,7 @@ void PurgeQueue::open(Context *completion)
     waiting_for_recovery.push_back(completion);
 
   journaler.recover(new LambdaContext([this](int r){
-    if (r == -CEPHFS_ENOENT) {
+    if (r == -ENOENT) {
       dout(1) << "Purge Queue not found, assuming this is an upgrade and "
                  "creating it." << dendl;
       create(NULL);
@@ -223,9 +236,10 @@ void PurgeQueue::open(Context *completion)
       // Journaler only guarantees entries before head write_pos have been
       // fully flushed. Before appending new entries, we need to find and
       // drop any partial written entry.
-      if (journaler.last_committed.write_pos < journaler.get_write_pos()) {
+      auto&& last_committed = journaler.get_last_committed();
+      if (last_committed.write_pos < journaler.get_write_pos()) {
 	dout(4) << "recovering write_pos" << dendl;
-	journaler.set_read_pos(journaler.last_committed.write_pos);
+	journaler.set_read_pos(last_committed.write_pos);
 	_recover();
 	return;
       }
@@ -247,7 +261,7 @@ void PurgeQueue::wait_for_recovery(Context* c)
     c->complete(0);
   } else if (readonly) {
     dout(10) << "cannot wait for recovery: PurgeQueue is readonly" << dendl;
-    c->complete(-CEPHFS_EROFS);
+    c->complete(-EROFS);
   } else {
     waiting_for_recovery.push_back(c);
   }
@@ -279,7 +293,8 @@ void PurgeQueue::_recover()
     if (journaler.get_read_pos() == journaler.get_write_pos()) {
       dout(4) << "write_pos recovered" << dendl;
       // restore original read_pos
-      journaler.set_read_pos(journaler.last_committed.expire_pos);
+      auto&& last_committed = journaler.get_last_committed();
+      journaler.set_read_pos(last_committed.expire_pos);
       journaler.set_writeable();
       recovered = true;
       finish_contexts(g_ceph_context, waiting_for_recovery);
@@ -325,7 +340,7 @@ void PurgeQueue::push(const PurgeItem &pi, Context *completion)
 
   if (readonly) {
     dout(10) << "cannot push inode: PurgeQueue is readonly" << dendl;
-    completion->complete(-CEPHFS_EROFS);
+    completion->complete(-EROFS);
     return;
   }
 
@@ -376,7 +391,7 @@ uint32_t PurgeQueue::_calculate_ops(const PurgeItem &item) const
     const uint64_t num = (item.size > 0) ?
       Striper::get_num_objects(item.layout, item.size) : 1;
 
-    ops_required = std::min(num, g_conf()->filer_max_purge_ops);
+    ops_required = num;
 
     // Account for deletions for old pools
     if (item.action != PurgeItem::TRUNCATE_FILE) {
@@ -462,7 +477,7 @@ bool PurgeQueue::_consume()
           std::lock_guard l(lock);
           if (r == 0) {
             _consume();
-          } else if (r != -CEPHFS_EAGAIN) {
+          } else if (r != -EAGAIN) {
             _go_readonly(r);
           }
         }));
@@ -485,7 +500,7 @@ bool PurgeQueue::_consume()
     } catch (const buffer::error &err) {
       derr << "Decode error at read_pos=0x" << std::hex
            << journaler.get_read_pos() << dendl;
-      _go_readonly(CEPHFS_EIO);
+      _go_readonly(EIO);
     }
     dout(20) << " executing item (" << item.ino << ")" << dendl;
     _execute_item(item, journaler.get_read_pos());
@@ -566,7 +581,7 @@ void PurgeQueue::_commit_ops(int r, const std::vector<PurgeItemCommitOp>& ops_ve
 	              new LambdaContext([this, expire_to](int r) {
     std::lock_guard l(lock);
 
-    if (r == -CEPHFS_EBLOCKLISTED) {
+    if (r == -EBLOCKLISTED) {
       finisher.queue(on_error, r);
       on_error = nullptr;
       return;
@@ -710,7 +725,8 @@ void PurgeQueue::_execute_item_complete(
     pending_expire.insert(expire_to);
   }
 
-  ops_in_flight -= _calculate_ops(iter->second);
+  auto executed_ops = _calculate_ops(iter->second);
+  ops_in_flight -= executed_ops;
   logger->set(l_pq_executing_ops, ops_in_flight);
   ops_high_water = std::max(ops_high_water, ops_in_flight);
   logger->set(l_pq_executing_ops_high_water, ops_high_water);
@@ -735,6 +751,7 @@ void PurgeQueue::_execute_item_complete(
     << "/" << expire_pos << ")" << dendl;
 
   logger->set(l_pq_item_in_journal, item_num);
+  logger->inc(l_pq_executed_ops, executed_ops);
   logger->inc(l_pq_executed);
 }
 
@@ -850,4 +867,3 @@ std::string_view PurgeItem::get_type_str() const
     return "UNKNOWN";
   }
 }
-

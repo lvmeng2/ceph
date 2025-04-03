@@ -19,21 +19,26 @@ export class GrafanaComponent implements OnInit, OnChanges {
   panelStyle: any;
   grafanaExist = false;
   mode = '&kiosk';
-  datasource = 'Dashboard1';
+  datasource: string;
   loading = true;
   styles: Record<string, string> = {};
   dashboardExist = true;
+  showMessage = false;
   time: string;
   grafanaTimes: any;
   icons = Icons;
   readonly DEFAULT_TIME: string = 'from=now-1h&to=now';
 
   @Input()
+  type: string;
+  @Input()
   grafanaPath: string;
   @Input()
   grafanaStyle: string;
   @Input()
   uid: string;
+  @Input()
+  title: string;
 
   constructor(private sanitizer: DomSanitizer, private settingsService: SettingsService) {
     this.grafanaTimes = [
@@ -153,6 +158,8 @@ export class GrafanaComponent implements OnInit, OnChanges {
       four: 'grafana_four'
     };
 
+    this.datasource = this.type === 'metrics' ? 'Dashboard1' : 'Loki';
+
     this.settingsService.ifSettingConfigured('api/grafana/url', (url) => {
       this.grafanaExist = true;
       this.loading = false;
@@ -165,17 +172,14 @@ export class GrafanaComponent implements OnInit, OnChanges {
   getFrame() {
     this.settingsService
       .validateGrafanaDashboardUrl(this.uid)
-      .subscribe((data: any) => (this.dashboardExist = data === 200));
-    this.url =
-      this.baseUrl +
-      this.uid +
-      '/' +
-      this.grafanaPath +
-      '&refresh=2s' +
-      `&var-datasource=${this.datasource}` +
-      this.mode +
-      '&' +
-      this.time;
+      .subscribe((data: any) => (this.dashboardExist = data === 200 || data === 401)); // 401 because grafana API shows unauthorized when anonymous access is disabled
+    if (this.type === 'metrics') {
+      this.url = `${this.baseUrl}${this.uid}/${this.grafanaPath}&refresh=2s&var-datasource=${this.datasource}${this.mode}&${this.time}`;
+    } else {
+      this.url = `${this.baseUrl.slice(0, -2)}${this.grafanaPath}orgId=1&left={"datasource": "${
+        this.datasource
+      }", "queries": [{"refId": "A"}], "range": {"from": "now-1h", "to": "now"}}${this.mode}`;
+    }
     this.grafanaSrc = this.sanitizer.bypassSecurityTrustResourceUrl(this.url);
   }
 

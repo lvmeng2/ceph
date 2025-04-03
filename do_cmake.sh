@@ -2,7 +2,7 @@
 set -ex
 
 if [ -d .git ]; then
-    git submodule update --init --recursive
+    git submodule update --init --recursive --progress --recommend-shallow
 fi
 
 : ${BUILD_DIR:=build}
@@ -14,24 +14,25 @@ if [ -e $BUILD_DIR ]; then
 fi
 
 PYBUILD="3"
-ARGS="-GNinja"
+ARGS="${ARGS} -GNinja"
 if [ -r /etc/os-release ]; then
   source /etc/os-release
   case "$ID" in
       fedora)
-          if [ "$VERSION_ID" -ge "35" ] ; then
-            PYBUILD="3.10"
-          elif [ "$VERSION_ID" -ge "33" ] ; then
-            PYBUILD="3.9"
-          elif [ "$VERSION_ID" -ge "32" ] ; then
-            PYBUILD="3.8"
+          if [ "$VERSION_ID" -ge "41" ] ; then
+            PYBUILD="3.13"
+          elif [ "$VERSION_ID" -ge "39" ] ; then
+            PYBUILD="3.12"
           else
-            PYBUILD="3.7"
+            # Fedora 37 and above
+            PYBUILD="3.11"
           fi
           ;;
-      rhel|centos)
+      almalinux|rocky|rhel|centos)
           MAJOR_VER=$(echo "$VERSION_ID" | sed -e 's/\..*$//')
-          if [ "$MAJOR_VER" -ge "9" ] ; then
+          if [ "$MAJOR_VER" -ge "10" ] ; then
+              PYBUILD="3.12"
+          elif [ "$MAJOR_VER" -ge "9" ] ; then
               PYBUILD="3.9"
           elif [ "$MAJOR_VER" -ge "8" ] ; then
               PYBUILD="3.6"
@@ -42,6 +43,15 @@ if [ -r /etc/os-release ]; then
           ARGS+=" -DWITH_RADOSGW_AMQP_ENDPOINT=OFF"
           ARGS+=" -DWITH_RADOSGW_KAFKA_ENDPOINT=OFF"
           ;;
+      ubuntu)
+          MAJOR_VER=$(echo "$VERSION_ID" | sed -e 's/\..*$//')
+          if [ "$MAJOR_VER" -ge "24" ] ; then
+              PYBUILD="3.12"
+          elif [ "$MAJOR_VER" -ge "22" ] ; then
+              PYBUILD="3.10"
+          fi
+          ;;
+
   esac
 elif [ "$(uname)" == FreeBSD ] ; then
   PYBUILD="3"
@@ -54,10 +64,26 @@ fi
 
 ARGS+=" -DWITH_PYTHON3=${PYBUILD}"
 
-if type ccache > /dev/null 2>&1 ; then
+if type sccache > /dev/null 2>&1 ; then
+    echo "enabling sccache"
+    ARGS+=" -DWITH_SCCACHE=ON"
+elif type ccache > /dev/null 2>&1 ; then
     echo "enabling ccache"
     ARGS+=" -DWITH_CCACHE=ON"
 fi
+
+cxx_compiler="g++"
+c_compiler="gcc"
+# 20 is used for more future-proof
+for i in $(seq 20 -1 11); do
+  if type -t gcc-$i > /dev/null; then
+    cxx_compiler="g++-$i"
+    c_compiler="gcc-$i"
+    break
+  fi
+done
+ARGS+=" -DCMAKE_CXX_COMPILER=$cxx_compiler"
+ARGS+=" -DCMAKE_C_COMPILER=$c_compiler"
 
 mkdir $BUILD_DIR
 cd $BUILD_DIR

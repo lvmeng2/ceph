@@ -11,9 +11,10 @@ from .exception import VolumeException
 
 log = logging.getLogger(__name__)
 
-def create_pool(mgr, pool_name):
+def create_pool(mgr, pool_name, **extra_args):
     # create the given pool
-    command = {'prefix': 'osd pool create', 'pool': pool_name}
+    command = extra_args
+    command.update({'prefix': 'osd pool create', 'pool': pool_name})
     return mgr.mon_command(command)
 
 def remove_pool(mgr, pool_name):
@@ -68,11 +69,36 @@ def volume_exists(mgr, fs_name):
             return True
     return False
 
-def listdir(fs, dirpath, filter_entries=None):
+def listdir(fs, dirpath, filter_entries=None, filter_files=True):
     """
-    Get the directory names (only dirs) for a given path
+    Get the directory entries for a given path. List only dirs if 'filter_files' is True.
+    Don't list the entries passed in 'filter_entries'
     """
-    dirs = []
+    entries = []
+    if filter_entries is None:
+        filter_entries = [b".", b".."]
+    else:
+        filter_entries.extend([b".", b".."])
+    try:
+        with fs.opendir(dirpath) as dir_handle:
+            d = fs.readdir(dir_handle)
+            while d:
+                if (d.d_name not in filter_entries):
+                    if not filter_files:
+                        entries.append(d.d_name)
+                    elif d.is_dir():
+                        entries.append(d.d_name)
+                d = fs.readdir(dir_handle)
+    except cephfs.Error as e:
+        raise VolumeException(-e.args[0], e.args[1])
+    return entries
+
+
+def has_subdir(fs, dirpath, filter_entries=None):
+    """
+    Check the presence of directory (only dirs) for a given path
+    """
+    res = False
     if filter_entries is None:
         filter_entries = [b".", b".."]
     else:
@@ -82,11 +108,12 @@ def listdir(fs, dirpath, filter_entries=None):
             d = fs.readdir(dir_handle)
             while d:
                 if (d.d_name not in filter_entries) and d.is_dir():
-                    dirs.append(d.d_name)
+                    res = True
+                    break
                 d = fs.readdir(dir_handle)
     except cephfs.Error as e:
         raise VolumeException(-e.args[0], e.args[1])
-    return dirs
+    return res
 
 def is_inherited_snap(snapname):
     """

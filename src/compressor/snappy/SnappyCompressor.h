@@ -58,19 +58,9 @@ class CEPH_BUFFER_API BufferlistSource : public snappy::Source {
 class SnappyCompressor : public Compressor {
  public:
   SnappyCompressor(CephContext* cct) : Compressor(COMP_ALG_SNAPPY, "snappy") {
-#ifdef HAVE_QATZIP
-    if (cct->_conf->qat_compressor_enabled && qat_accel.init("snappy"))
-      qat_enabled = true;
-    else
-      qat_enabled = false;
-#endif
   }
 
-  int compress(const ceph::bufferlist &src, ceph::bufferlist &dst, boost::optional<int32_t> &compressor_message) override {
-#ifdef HAVE_QATZIP
-    if (qat_enabled)
-      return qat_accel.compress(src, dst, compressor_message);
-#endif
+  int compress(const ceph::bufferlist &src, ceph::bufferlist &dst, std::optional<int32_t> &compressor_message) override {
     BufferlistSource source(const_cast<ceph::bufferlist&>(src).begin(), src.length());
     ceph::bufferptr ptr = ceph::buffer::create_small_page_aligned(
       snappy::MaxCompressedLength(src.length()));
@@ -80,11 +70,7 @@ class SnappyCompressor : public Compressor {
     return 0;
   }
 
-  int decompress(const ceph::bufferlist &src, ceph::bufferlist &dst, boost::optional<int32_t> compressor_message) override {
-#ifdef HAVE_QATZIP
-    if (qat_enabled)
-      return qat_accel.decompress(src, dst, compressor_message);
-#endif
+  int decompress(const ceph::bufferlist &src, ceph::bufferlist &dst, std::optional<int32_t> compressor_message) override {
     auto i = src.begin();
     return decompress(i, src.length(), dst, compressor_message);
   }
@@ -92,11 +78,7 @@ class SnappyCompressor : public Compressor {
   int decompress(ceph::bufferlist::const_iterator &p,
 		 size_t compressed_len,
 		 ceph::bufferlist &dst,
-		 boost::optional<int32_t> compressor_message) override {
-#ifdef HAVE_QATZIP
-    if (qat_enabled)
-      return qat_accel.decompress(p, compressed_len, dst, compressor_message);
-#endif
+		 std::optional<int32_t> compressor_message) override {
     BufferlistSource source_1(p, compressed_len);
     uint32_t res_len = 0;
     if (!snappy::GetUncompressedLength(&source_1, &res_len)) {

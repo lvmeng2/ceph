@@ -23,6 +23,8 @@
 #include <errno.h>
 #include <sys/uio.h>
 
+#include <iostream> // for std::cout
+
 #include "include/buffer.h"
 #include "include/buffer_raw.h"
 #include "include/compat.h"
@@ -68,8 +70,7 @@ TEST(Buffer, constructors) {
     bufferptr ptr(buffer::claim_char(len, str));
     EXPECT_EQ(len, ptr.length());
     EXPECT_EQ(str, ptr.c_str());
-    bufferptr clone = ptr.clone();
-    EXPECT_EQ(0, ::memcmp(clone.c_str(), ptr.c_str(), len));
+    EXPECT_EQ(0, ::memcmp(str, ptr.c_str(), len));
     delete [] str;
   }
   //
@@ -100,8 +101,7 @@ TEST(Buffer, constructors) {
     bufferptr ptr(buffer::claim_malloc(len, str));
     EXPECT_EQ(len, ptr.length());
     EXPECT_EQ(str, ptr.c_str());
-    bufferptr clone = ptr.clone();
-    EXPECT_EQ(0, ::memcmp(clone.c_str(), ptr.c_str(), len));
+    EXPECT_EQ(0, ::memcmp(str, ptr.c_str(), len));
   }
   //
   // buffer::copy
@@ -123,8 +123,6 @@ TEST(Buffer, constructors) {
 #ifndef DARWIN
     ASSERT_TRUE(ptr.is_page_aligned());
 #endif // DARWIN 
-    bufferptr clone = ptr.clone();
-    EXPECT_EQ(0, ::memcmp(clone.c_str(), ptr.c_str(), len));
   }
 }
 
@@ -331,14 +329,6 @@ TEST(BufferPtr, assignment) {
     ASSERT_EQ(original.offset(), ptr.offset());
     ASSERT_EQ(original.length(), ptr.length());
   }
-}
-
-TEST(BufferPtr, clone) {
-  unsigned len = 17;
-  bufferptr ptr(len);
-  ::memset(ptr.c_str(), 'X', len);
-  bufferptr clone = ptr.clone();
-  EXPECT_EQ(0, ::memcmp(clone.c_str(), ptr.c_str(), len));
 }
 
 TEST(BufferPtr, swap) {
@@ -1632,7 +1622,7 @@ TEST(BufferList, contents_equal) {
 }
 
 TEST(BufferList, is_aligned) {
-  const int SIMD_ALIGN = 32;
+  const int SIMD_ALIGN = 64;
   {
     bufferlist bl;
     EXPECT_TRUE(bl.is_aligned(SIMD_ALIGN));
@@ -1660,7 +1650,7 @@ TEST(BufferList, is_aligned) {
 }
 
 TEST(BufferList, is_n_align_sized) {
-  const int SIMD_ALIGN = 32;
+  const int SIMD_ALIGN = 64;
   {
     bufferlist bl;
     EXPECT_TRUE(bl.is_n_align_sized(SIMD_ALIGN));
@@ -1804,7 +1794,7 @@ TEST(BufferList, page_aligned_appender) {
 }
 
 TEST(BufferList, rebuild_aligned_size_and_memory) {
-  const unsigned SIMD_ALIGN = 32;
+  const unsigned SIMD_ALIGN = 64;
   const unsigned BUFFER_SIZE = 67;
 
   bufferlist bl;

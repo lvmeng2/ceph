@@ -27,8 +27,8 @@ $dark-secondary: darken(vv.$secondary, 4%);
     outline: none;
   }
 
-  .placeholder {
-    color: vv.$gray-600;
+  label {
+    color: vv.$gray-500;
   }
 
   .btn-password:focus {

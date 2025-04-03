@@ -18,88 +18,102 @@ Linux Kernel
   maintenance" kernel series provided by either http://kernel.org or
   your Linux distribution on any client hosts.
 
-  For RBD, if you choose to *track* long-term kernels, we currently recommend
-  4.x-based "longterm maintenance" kernel series or later:
-
-  - 4.19.z
-  - 4.14.z
-  - 5.x
+  For RBD, if you choose to *track* long-term kernels, we recommend
+  *at least* 4.19-based "longterm maintenance" kernel series.  If you can
+  use a newer "stable" or "longterm maintenance" kernel series, do it.
 
   For CephFS, see the section about `Mounting CephFS using Kernel Driver`_
   for kernel version guidance.
 
   Older kernel client versions may not support your `CRUSH tunables`_ profile
-  or other newer features of the Ceph cluster, requiring the storage cluster
-  to be configured with those features disabled.
+  or other newer features of the Ceph cluster, requiring the storage cluster to
+  be configured with those features disabled. For RBD, a kernel of version 5.3
+  or CentOS 8.2 is the minimum necessary for reasonable support for RBD image
+  features.
 
 
 Platforms
 =========
 
-The charts below show how Ceph's requirements map onto various Linux
-platforms.  Generally speaking, there is very little dependence on
-specific distributions aside from the kernel and system initialization
-package (i.e., sysvinit, systemd).
+The chart below shows which Linux platforms Ceph provides packages for, and
+which platforms Ceph has been tested on. 
 
-Octopus (15.2.z)
------------------
+Ceph does not require a specific Linux distribution. Ceph can run on any
+distribution that includes a supported kernel and supported system startup
+framework, for example ``sysvinit`` or ``systemd``. Ceph is sometimes ported to
+non-Linux systems but these are not supported by the core Ceph effort.
 
-+----------+----------+--------------------+--------------+---------+------------+
-| Distro   | Release  | Code Name          | Kernel       | Notes   | Testing    |
-+==========+==========+====================+==============+=========+============+
-| CentOS   | 8        | N/A                | linux-4.18   |         | B, I, C    |
-+----------+----------+--------------------+--------------+---------+------------+
-| CentOS   | 7        | N/A                | linux-3.10.0 | 4, 5    | B, I       |
-+----------+----------+--------------------+--------------+---------+------------+
-| Debian   | 10       | Buster             | linux-4.19   |         | B          |
-+----------+----------+--------------------+--------------+---------+------------+
-| RHEL     | 8        | Ootpa              | linux-4.18   |         | B, I, C    |
-+----------+----------+--------------------+--------------+---------+------------+
-| RHEL     | 7        | Maipo              | linux-3.10.0 |         | B, I       |
-+----------+----------+--------------------+--------------+---------+------------+
-| Ubuntu   | 18.04    | Bionic Beaver      | linux-4.15   | 4       | B, I, C    |
-+----------+----------+--------------------+--------------+---------+------------+
-| openSUSE | 15.2     | Leap               | linux-5.3    | 6       |            |
-+----------+----------+--------------------+--------------+---------+------------+
-| openSUSE |          | Tumbleweed         |              |         |            |
-+----------+----------+--------------------+--------------+---------+------------+
++---------------+----------------+---------------+------------------+------------------+------------------+
+|               | Squid (19.2.z) | Reef (18.2.z) | Quincy (17.2.z)  | Pacific (16.2.z) | Octopus (15.2.z) |
++===============+================+===============+==================+==================+==================+
+| Centos 7      |                |               |                  |                  |      B           |
++---------------+----------------+---------------+------------------+------------------+------------------+
+| Centos 8      |                |               |                  |                  |                  |
++---------------+----------------+---------------+------------------+------------------+------------------+
+| Centos 9      | A              |    A          |     A :sup:`1`   |                  |                  |
++---------------+----------------+---------------+------------------+------------------+------------------+
+| Debian 10     |                |    C          |                  |         C        |      C           |
++---------------+----------------+---------------+------------------+------------------+------------------+
+| Debian 11     |                |    C          |     C            |         C        |                  |
++---------------+----------------+---------------+------------------+------------------+------------------+
+| Debian 12     | C              |    C          |                  |                  |                  |
++---------------+----------------+---------------+------------------+------------------+------------------+
+| OpenSUSE 15.2 |                |    C          |                  |         C        |      C           |
++---------------+----------------+---------------+------------------+------------------+------------------+
+| OpenSUSE 15.3 |                |    C          |     C            |                  |                  |
++---------------+----------------+---------------+------------------+------------------+------------------+
+| Ubuntu 18.04  |                |               |                  |         C        |      C           |
++---------------+----------------+---------------+------------------+------------------+------------------+
+| Ubuntu 20.04  |                |    A          |     A            |         A        |      A           |
++---------------+----------------+---------------+------------------+------------------+------------------+
+| Ubuntu 22.04  | A              |    A          |                  |                  |                  |
++---------------+----------------+---------------+------------------+------------------+------------------+
 
+- **A**: Ceph provides packages and has done comprehensive tests on the software in them.
+- **B**: Ceph provides packages and has done basic tests on the software in them.
+- **C**: Ceph provides packages only. No tests have been done on these releases.
+- **1**: Testing has been done on Centos 9 starting on version 17.2.8 for Quincy.
 
-Notes
------
+Container Hosts
+---------------
 
-- **1**: The default kernel has an older version of ``Btrfs`` that we do not
-  recommend for ``ceph-osd`` storage nodes.  We recommend using ``BlueStore``
-  starting with Luminous, and ``XFS`` for previous releases with ``Filestore``.
+This table shows the operating systems that support Ceph's official container images.
 
-- **2**: The default kernel has an old Ceph client that we do not recommend
-  for kernel client (kernel RBD or the Ceph file system).  Upgrade to a
-  recommended kernel.
++---------------+----------------+------------------+------------------+
+|               | Squid (19.2.z) | Reef (18.2.z)    | Quincy (17.2.z)  |
++===============+================+==================+==================+
+| Centos 7      |                |                  |                  |
++---------------+----------------+------------------+------------------+
+| Centos 8      |                |                  |                  |
++---------------+----------------+------------------+------------------+
+| Centos 9      |      H         |        H         |        H         |
++---------------+----------------+------------------+------------------+
+| Debian 10     |                |                  |                  |
++---------------+----------------+------------------+------------------+
+| Debian 11     |                |                  |                  |
++---------------+----------------+------------------+------------------+
+| OpenSUSE 15.2 |                |                  |                  |
++---------------+----------------+------------------+------------------+
+| OpenSUSE 15.3 |                |                  |                  |
++---------------+----------------+------------------+------------------+
+| Ubuntu 18.04  |                |                  |                  |
++---------------+----------------+------------------+------------------+
+| Ubuntu 20.04  |                |                  |                  |
++---------------+----------------+------------------+------------------+
+| Ubuntu 22.04  |      H         |        H         |                  |
++---------------+----------------+------------------+------------------+
 
-- **3**: The default kernel regularly fails in QA when the ``Btrfs``
-  file system is used.  We recommend using ``BlueStore`` starting from
-  Luminous, and ``XFS`` for previous releases with ``Filestore``.
+- **H**: Ceph tests this distribution as a container host.
 
-- **4**: ``btrfs`` is no longer tested on this release. We recommend
-  using ``bluestore``.
+.. note::
+   **For Centos 7 Users** 
+   
+   ``Btrfs`` is no longer tested on Centos 7 in the Octopus release. We recommend using ``bluestore`` instead.
 
-- **5**: Some additional features related to dashboard are not available.
+.. note:: See the list of QAed container hosts in the Ceph repository here:
+   `List of Container Hosts
+   <https://github.com/ceph/ceph/tree/main/qa/distros/supported-container-hosts>`_.
 
-- **6**: Packages are built regularly, but not distributed by upstream Ceph.
-
-Testing
--------
-
-- **B**: We build release packages for this platform. For some of these
-  platforms, we may also continuously build all Ceph branches and perform
-  basic unit tests.
-
-- **I**: We do basic installation and functionality tests of releases on this
-  platform.
-
-- **C**: We run a comprehensive functional, regression, and stress test suite
-  on this platform on a continuous basis. This includes development branches,
-  pre-release, and released code.
 
 .. _CRUSH Tunables: ../../rados/operations/crush-map#tunables
 

@@ -1,8 +1,9 @@
-# This module builds Boost
-# executables are. It sets the following variables:
+# This module builds Boost. It sets the following variables:
 #
 #  Boost_FOUND : boolean            - system has Boost
+#  BOOST_ROOT : path
 #  Boost_LIBRARIES : list(filepath) - the libraries needed to use Boost
+#  Boost_LIBRARY_DIR_RELEASE : path - the library path
 #  Boost_INCLUDE_DIRS : list(path)  - the Boost include directories
 #
 # Following hints are respected
@@ -10,6 +11,8 @@
 #  Boost_USE_STATIC_LIBS : boolean (default: OFF)
 #  Boost_USE_MULTITHREADED : boolean (default: OFF)
 #  BOOST_J: integer (defanult 1)
+#
+# Note: Remove boost_redis submodule once upgraded to Boost version that includes it
 
 function(check_boost_version source_dir expected_version)
   set(version_hpp "${source_dir}/boost/version.hpp")
@@ -46,7 +49,11 @@ endmacro()
 
 function(do_build_boost root_dir version)
   cmake_parse_arguments(Boost_BUILD "" "" COMPONENTS ${ARGN})
-  set(boost_features "variant=release")
+  if(CMAKE_BUILD_TYPE STREQUAL Debug)
+    set(boost_features "variant=debug")
+  else()
+    set(boost_features "variant=release")
+  endif()
   if(Boost_USE_MULTITHREADED)
     list(APPEND boost_features "threading=multi")
   else()
@@ -62,8 +69,6 @@ function(do_build_boost root_dir version)
   else()
     list(APPEND boost_features "address-model=32")
   endif()
-  set(BOOST_CXXFLAGS "-fPIC -w") # check on arm, etc <---XXX
-  list(APPEND boost_features "cxxflags=${BOOST_CXXFLAGS}")
 
   set(boost_with_libs)
   foreach(c ${Boost_BUILD_COMPONENTS})
@@ -79,18 +84,6 @@ function(do_build_boost root_dir version)
   endforeach()
   list_replace(boost_with_libs "unit_test_framework" "test")
   string(REPLACE ";" "," boost_with_libs "${boost_with_libs}")
-  # build b2 and prepare the project-config.jam for boost
-  set(configure_command
-    ./bootstrap.sh --prefix=<INSTALL_DIR>
-    --with-libraries=${boost_with_libs})
-
-  set(b2 ./b2)
-  if(BOOST_J)
-    message(STATUS "BUILDING Boost Libraries at j ${BOOST_J}")
-    list(APPEND b2 -j${BOOST_J})
-  endif()
-  # suppress all debugging levels for b2
-  list(APPEND b2 -d0)
 
   if(CMAKE_CXX_COMPILER_ID STREQUAL GNU)
     set(toolset gcc)
@@ -100,6 +93,20 @@ function(do_build_boost root_dir version)
     message(SEND_ERROR "unknown compiler: ${CMAKE_CXX_COMPILER_ID}")
   endif()
 
+  # build b2 and prepare the project-config.jam for boost
+  set(configure_command
+    ./bootstrap.sh --prefix=<INSTALL_DIR>
+    --with-libraries=${boost_with_libs}
+    --with-toolset=${toolset})
+
+  set(b2 ./b2)
+  if(BOOST_J)
+    message(STATUS "BUILDING Boost Libraries at j ${BOOST_J}")
+    list(APPEND b2 -j${BOOST_J})
+  endif()
+  # suppress all debugging levels for b2
+  list(APPEND b2 -d0)
+
   set(user_config ${CMAKE_BINARY_DIR}/user-config.jam)
   # edit the user-config.jam so b2 will be able to use the specified
   # toolset and python
@@ -107,6 +114,7 @@ function(do_build_boost root_dir version)
     "using ${toolset}"
     " : "
     " : ${CMAKE_CXX_COMPILER}"
+    " : <compileflags>-fPIC <compileflags>-w <compileflags>-Wno-everything"
     " ;\n")
   if(with_python_version)
     find_package(Python3 ${with_python_version} QUIET REQUIRED
@@ -134,6 +142,9 @@ function(do_build_boost root_dir version)
   if(WITH_BOOST_VALGRIND)
     list(APPEND b2 valgrind=on)
   endif()
+  if(WITH_ASAN)
+    list(APPEND b2 context-impl=ucontext)
+  endif()
   set(build_command
     ${b2} headers stage
     #"--buildid=ceph" # changes lib names--can omit for static
@@ -144,23 +155,19 @@ function(do_build_boost root_dir version)
     check_boost_version("${PROJECT_SOURCE_DIR}/src/boost" ${version})
     set(source_dir
       SOURCE_DIR "${PROJECT_SOURCE_DIR}/src/boost")
-  elseif(version VERSION_GREATER 1.75)
+  elseif(version VERSION_GREATER 1.87)
     message(FATAL_ERROR "Unknown BOOST_REQUESTED_VERSION: ${version}")
   else()
     message(STATUS "boost will be downloaded...")
     # NOTE: If you change this version number make sure the package is available
     # at the three URLs below (may involve uploading to download.ceph.com)
-    set(boost_version 1.75.0)
-    set(boost_sha256 953db31e016db7bb207f11432bef7df100516eeb746843fa0486a222e3fd49cb)
+    set(boost_version 1.87.0)
+    set(boost_sha256 af57be25cb4c4f4b413ed692fe378affb4352ea50fbe294a11ef548f4d527d89)
     string(REPLACE "." "_" boost_version_underscore ${boost_version} )
-    set(boost_url 
+    list(APPEND boost_url
+      https://download.ceph.com/qa/boost_${boost_version_underscore}.tar.bz2
+      https://archives.boost.io//release/${boost_version}/source/boost_${boost_version_underscore}.tar.bz2
       https://boostorg.jfrog.io/artifactory/main/release/${boost_version}/source/boost_${boost_version_underscore}.tar.bz2)
-    if(CMAKE_VERSION VERSION_GREATER 3.7)
-      set(boost_url
-        "${boost_url} http://downloads.sourceforge.net/project/boost/boost/${boost_version}/boost_${boost_version_underscore}.tar.bz2")
-      set(boost_url
-        "${boost_url} https://download.ceph.com/qa/boost_${boost_version_underscore}.tar.bz2")
-    endif()
     set(source_dir
       URL ${boost_url}
       URL_HASH SHA256=${boost_sha256}
@@ -190,8 +197,10 @@ macro(build_boost version)
   # target, so we can collect "Boost_LIBRARIES" which is then used by
   # ExternalProject_Add(Boost ...)
   set(install_dir "${CMAKE_BINARY_DIR}/boost")
+  set(BOOST_ROOT ${install_dir})
   set(Boost_INCLUDE_DIRS ${install_dir}/include)
   set(Boost_INCLUDE_DIR ${install_dir}/include)
+  set(Boost_LIBRARY_DIR_RELEASE ${install_dir}/lib)
   set(Boost_VERSION ${version})
   # create the directory so cmake won't complain when looking at the imported
   # target
@@ -232,6 +241,10 @@ macro(build_boost version)
     if((c MATCHES "coroutine|context") AND (WITH_BOOST_VALGRIND))
       set_target_properties(Boost::${c} PROPERTIES
         INTERFACE_COMPILE_DEFINITIONS "BOOST_USE_VALGRIND")
+    endif()
+    if((c MATCHES "context") AND (WITH_ASAN))
+      set_target_properties(Boost::${c} PROPERTIES
+        INTERFACE_COMPILE_DEFINITIONS "BOOST_USE_ASAN;BOOST_USE_UCONTEXT")
     endif()
     list(APPEND Boost_LIBRARIES ${Boost_${upper_c}_LIBRARY})
   endforeach()

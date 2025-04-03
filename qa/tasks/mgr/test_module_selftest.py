@@ -36,13 +36,6 @@ class TestModuleSelftest(MgrTestCase):
         self.mgr_cluster.mon_manager.raw_cluster_cmd(
                 "mgr", "self-test", "module", module_name)
 
-    def test_zabbix(self):
-        # Set these mandatory config fields so that the zabbix module
-        # won't trigger health/log errors on load/serve.
-        self.mgr_cluster.set_module_conf("zabbix", "zabbix_host", "localhost")
-        self.mgr_cluster.set_module_conf("zabbix", "identifier", "foo")
-        self._selftest_plugin("zabbix")
-
     def test_prometheus(self):
         self._assign_ports("prometheus", "server_port", min_port=8100)
         self._selftest_plugin("prometheus")
@@ -54,7 +47,7 @@ class TestModuleSelftest(MgrTestCase):
         self._load_module("selftest")
         python_version = self.mgr_cluster.mon_manager.raw_cluster_cmd(
             "mgr", "self-test", "python-version")
-        if tuple(int(v) for v in python_version.split('.')) >= (3, 8):
+        if tuple(int(v) for v in python_version.split('.')) == (3, 8):
             # https://tracker.ceph.com/issues/45147
             self.skipTest(f'python {python_version} not compatible with '
                           'diskprediction_local')

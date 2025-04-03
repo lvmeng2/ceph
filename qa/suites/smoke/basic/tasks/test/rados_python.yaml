@@ -1,3 +1,8 @@
+overrides:
+  install:
+    ceph:
+      extra_system_packages:
+      - python3-pytest
 tasks:
 - ceph:
     log-ignorelist:
@@ -10,6 +15,7 @@ tasks:
     - \(POOL_APP_NOT_ENABLED\)
 - ceph-fuse:
 - workunit:
+    timeout: 1h
     clients:
       client.0:
         - rados/test_python.sh

@@ -5,10 +5,13 @@
 #include "ObjectCopyRequest.h"
 #include "common/errno.h"
 #include "librbd/Utils.h"
+#include "librbd/asio/ContextWQ.h"
 #include "librbd/deep_copy/Handler.h"
 #include "librbd/deep_copy/Utils.h"
 #include "librbd/object_map/DiffRequest.h"
 #include "osdc/Striper.h"
+
+#include <shared_mutex> // for std::shared_lock
 
 #define dout_subsys ceph_subsys_rbd
 #undef dout_prefix
@@ -18,6 +21,7 @@
 namespace librbd {
 namespace deep_copy {
 
+using librbd::util::create_async_context_callback;
 using librbd::util::create_context_callback;
 using librbd::util::unique_lock_name;
 
@@ -37,6 +41,13 @@ ImageCopyRequest<I>::ImageCopyRequest(I *src_image_ctx, I *dst_image_ctx,
     m_flatten(flatten), m_object_number(object_number), m_snap_seqs(snap_seqs),
     m_handler(handler), m_on_finish(on_finish), m_cct(dst_image_ctx->cct),
     m_lock(ceph::make_mutex(unique_lock_name("ImageCopyRequest::m_lock", this))) {
+
+    ldout(m_cct, 20) << "src_image_id=" << m_src_image_ctx->id
+		     << ", dst_image_id=" << m_dst_image_ctx->id
+	             << ", src_snap_id_start=" << m_src_snap_id_start
+                     << ", src_snap_id_end=" << m_src_snap_id_end
+		     << ", dst_snap_id_start=" << m_dst_snap_id_start
+		     << dendl;
 }
 
 template <typename I>
@@ -99,9 +110,10 @@ void ImageCopyRequest<I>::compute_diff() {
 
   auto ctx = create_context_callback<
     ImageCopyRequest<I>, &ImageCopyRequest<I>::handle_compute_diff>(this);
-  auto req = object_map::DiffRequest<I>::create(m_src_image_ctx, m_src_snap_id_start,
-                                                m_src_snap_id_end, &m_object_diff_state,
-                                                ctx);
+  auto req = object_map::DiffRequest<I>::create(m_src_image_ctx,
+                                                m_src_snap_id_start,
+                                                m_src_snap_id_end, 0, UINT64_MAX,
+                                                &m_object_diff_state, ctx);
   req->send();
 }
 
@@ -145,11 +157,8 @@ void ImageCopyRequest<I>::send_object_copies() {
 
     // attempt to schedule at least 'max_ops' initial requests where
     // some objects might be skipped if fast-diff notes no change
-    while (m_current_ops < max_ops) {
-      int r = send_next_object_copy();
-      if (r < 0) {
-        break;
-      }
+    for (uint64_t i = 0; i < max_ops; i++) {
+      send_next_object_copy();
     }
 
     complete = (m_current_ops == 0) && !m_updating_progress;
@@ -161,7 +170,7 @@ void ImageCopyRequest<I>::send_object_copies() {
 }
 
 template <typename I>
-int ImageCopyRequest<I>::send_next_object_copy() {
+void ImageCopyRequest<I>::send_next_object_copy() {
   ceph_assert(ceph_mutex_is_locked(m_lock));
 
   if (m_canceled && m_ret_val == 0) {
@@ -169,13 +178,18 @@ int ImageCopyRequest<I>::send_next_object_copy() {
     m_ret_val = -ECANCELED;
   }
 
-  if (m_ret_val < 0) {
-    return m_ret_val;
-  } else if (m_object_no >= m_end_object_no) {
-    return -ENODATA;
+  if (m_ret_val < 0 || m_object_no >= m_end_object_no) {
+    return;
   }
 
   uint64_t ono = m_object_no++;
+  Context *ctx = new LambdaContext(
+    [this, ono](int r) {
+      handle_object_copy(ono, r);
+    });
+
+  ldout(m_cct, 20) << "object_num=" << ono << dendl;
+  ++m_current_ops;
 
   uint8_t object_diff_state = object_map::DIFF_STATE_HOLE;
   if (m_object_diff_state.size() > 0) {
@@ -199,12 +213,10 @@ int ImageCopyRequest<I>::send_next_object_copy() {
 
     if (object_diff_state == object_map::DIFF_STATE_HOLE) {
       ldout(m_cct, 20) << "skipping non-existent object " << ono << dendl;
-      return 1;
+      create_async_context_callback(*m_src_image_ctx, ctx)->complete(0);
+      return;
     }
   }
-
-  ldout(m_cct, 20) << "object_num=" << ono << dendl;
-  ++m_current_ops;
 
   uint32_t flags = 0;
   if (m_flatten) {
@@ -215,15 +227,10 @@ int ImageCopyRequest<I>::send_next_object_copy() {
     flags |= OBJECT_COPY_REQUEST_FLAG_EXISTS_CLEAN;
   }
 
-  Context *ctx = new LambdaContext(
-    [this, ono](int r) {
-      handle_object_copy(ono, r);
-    });
   auto req = ObjectCopyRequest<I>::create(
     m_src_image_ctx, m_dst_image_ctx, m_src_snap_id_start, m_dst_snap_id_start,
     m_snap_map, ono, flags, m_handler, ctx);
   req->send();
-  return 0;
 }
 
 template <typename I>
@@ -258,13 +265,7 @@ void ImageCopyRequest<I>::handle_object_copy(uint64_t object_no, int r) {
       }
     }
 
-    while (true) {
-      r = send_next_object_copy();
-      if (r != 1) {
-        break;
-      }
-    }
-
+    send_next_object_copy();
     complete = (m_current_ops == 0) && !m_updating_progress;
   }
 

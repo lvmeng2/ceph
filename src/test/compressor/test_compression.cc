@@ -17,6 +17,9 @@
 #include <errno.h>
 #include <signal.h>
 #include <stdlib.h>
+
+#include <iostream> // for std::cout
+
 #include "gtest/gtest.h"
 #include "common/ceph_context.h"
 #include "common/config.h"
@@ -78,7 +81,7 @@ TEST_P(CompressorTest, small_round_trip)
   bufferlist orig;
   orig.append("This is a short string.  There are many strings like it but this one is mine.");
   bufferlist compressed;
-  boost::optional<int32_t> compressor_message;
+  std::optional<int32_t> compressor_message;
   int r = compressor->compress(orig, compressed, compressor_message);
   ASSERT_EQ(0, r);
   bufferlist decompressed;
@@ -98,7 +101,7 @@ TEST_P(CompressorTest, big_round_trip_repeated)
     orig.append("This is a short string.  There are many strings like it but this one is mine.");
   }
   bufferlist compressed;
-  boost::optional<int32_t> compressor_message;
+  std::optional<int32_t> compressor_message;
   int r = compressor->compress(orig, compressed, compressor_message);
   ASSERT_EQ(0, r);
   bufferlist decompressed;
@@ -128,7 +131,7 @@ TEST_P(CompressorTest, big_round_trip_randomish)
     orig.append(bp);
   }
   bufferlist compressed;
-  boost::optional<int32_t> compressor_message;
+  std::optional<int32_t> compressor_message;
   int r = compressor->compress(orig, compressed, compressor_message);
   ASSERT_EQ(0, r);
   bufferlist decompressed;
@@ -183,7 +186,7 @@ TEST_P(CompressorTest, round_trip_osdmap)
     chunk.substr_of(fbl, j*size, l);
     //fbl.rebuild();
     bufferlist compressed;
-    boost::optional<int32_t> compressor_message;
+    std::optional<int32_t> compressor_message;
     int r = compressor->compress(chunk, compressed, compressor_message);
     ASSERT_EQ(0, r);
     bufferlist decompressed;
@@ -211,7 +214,7 @@ TEST_P(CompressorTest, compress_decompress)
   bufferlist after;
   bufferlist exp;
   in.append(test, len);
-  boost::optional<int32_t> compressor_message;
+  std::optional<int32_t> compressor_message;
   res = compressor->compress(in, out, compressor_message);
   EXPECT_EQ(res, 0);
   res = compressor->decompress(out, after, compressor_message);
@@ -261,7 +264,7 @@ TEST_P(CompressorTest, sharded_input_decompress)
   int len = test.size();
   bufferlist in, out;
   in.append(test.c_str(), len);
-  boost::optional<int32_t> compressor_message;
+  std::optional<int32_t> compressor_message;
   int res = compressor->compress(in, out, compressor_message);
   EXPECT_EQ(res, 0);
   EXPECT_GT(out.length(), small_prefix_size);
@@ -294,7 +297,7 @@ void test_compress(CompressorRef compressor, size_t size)
   in.append(data, size);
   for (size_t t = 0; t < 10000; t++) {
     bufferlist out;
-    boost::optional<int32_t> compressor_message;
+    std::optional<int32_t> compressor_message;
     int res = compressor->compress(in, out, compressor_message);
     EXPECT_EQ(res, 0);
   }
@@ -309,7 +312,7 @@ void test_decompress(CompressorRef compressor, size_t size)
   }
   bufferlist in, out;
   in.append(data, size);
-  boost::optional<int32_t> compressor_message;
+  std::optional<int32_t> compressor_message;
   int res = compressor->compress(in, out, compressor_message);
   EXPECT_EQ(res, 0);
   for (size_t t = 0; t < 10000; t++) {
@@ -378,7 +381,7 @@ INSTANTIATE_TEST_SUITE_P(
 #ifdef HAVE_LZ4
     "lz4",
 #endif
-#ifdef __x86_64__
+#if defined(__x86_64__) || defined(__aarch64__)
     "zlib/isal",
 #endif
     "zlib/noisal",
@@ -388,7 +391,7 @@ INSTANTIATE_TEST_SUITE_P(
 #endif
     "zstd"));
 
-#ifdef __x86_64__
+#if defined(__x86_64__) || defined(__aarch64__)
 
 TEST(ZlibCompressor, zlib_isal_compatibility)
 {
@@ -411,7 +414,7 @@ TEST(ZlibCompressor, zlib_isal_compatibility)
   bufferlist in, out;
   in.append(test, len);
   // isal -> zlib
-  boost::optional<int32_t> compressor_message;
+  std::optional<int32_t> compressor_message;
   int res = isal->compress(in, out, compressor_message);
   EXPECT_EQ(res, 0);
   bufferlist after;
@@ -453,7 +456,7 @@ TEST(CompressionPlugin, all)
   }
 }
 
-#ifdef __x86_64__
+#if defined(__x86_64__) || defined(__aarch64__)
 
 TEST(ZlibCompressor, isal_compress_zlib_decompress_random)
 {
@@ -480,7 +483,7 @@ TEST(ZlibCompressor, isal_compress_zlib_decompress_random)
     bufferlist in, out;
     in.append(test, size);
 
-    boost::optional<int32_t> compressor_message;
+    std::optional<int32_t> compressor_message;
     int res = isal->compress(in, out, compressor_message);
     EXPECT_EQ(res, 0);
     bufferlist after;
@@ -520,7 +523,7 @@ TEST(ZlibCompressor, isal_compress_zlib_decompress_walk)
     bufferlist in, out;
     in.append(test, size);
 
-    boost::optional<int32_t> compressor_message;
+    std::optional<int32_t> compressor_message;
     int res = isal->compress(in, out, compressor_message);
     EXPECT_EQ(res, 0);
     bufferlist after;
@@ -559,7 +562,7 @@ TEST(QAT, enc_qat_dec_noqat) {
       bufferlist in, out;
       in.append(test, size);
   
-      boost::optional<int32_t> compressor_message;
+      std::optional<int32_t> compressor_message;
       int res = q->compress(in, out, compressor_message);
       EXPECT_EQ(res, 0);
       bufferlist after;
@@ -596,7 +599,7 @@ TEST(QAT, enc_noqat_dec_qat) {
       bufferlist in, out;
       in.append(test, size);
   
-      boost::optional<int32_t> compressor_message;
+      std::optional<int32_t> compressor_message;
       int res = noq->compress(in, out, compressor_message);
       EXPECT_EQ(res, 0);
       bufferlist after;
@@ -610,3 +613,88 @@ TEST(QAT, enc_noqat_dec_qat) {
 }
 
 #endif	// HAVE_QATZIP
+
+#ifdef HAVE_UADK
+TEST(UADK, enc_uadk_dec_nouadk) {
+  //reserve for more algs in the future
+  const char* alg_collection[] = {"zlib"};
+
+  for (auto alg : alg_collection) {
+    g_conf().set_val("uadk_compressor_enabled", "true");
+    g_conf().set_val("compressor_zlib_winsize", "15");
+    g_ceph_context->_conf.apply_changes(nullptr);
+    CompressorRef hw = Compressor::create(g_ceph_context, alg);
+    if (hw == NULL) 
+      return;
+
+    g_conf().set_val("uadk_compressor_enabled", "false");
+    g_conf().set_val("compressor_zlib_winsize", "15");
+    g_ceph_context->_conf.apply_changes(nullptr);
+    CompressorRef sw = Compressor::create(g_ceph_context, alg);
+
+    //generate random buffer
+    for (int cnt = 0; cnt < 100; cnt++) {
+      srand(cnt + 1000);
+      int log2 = (rand()%18) + 1;
+      int size = (rand() % (1 << log2)) + 1;
+
+      char test[size];
+      for (int i = 0; i < size; ++i)
+	        test[i] = rand()%256;
+      bufferlist in, out;
+      in.append(test, size);
+
+      std::optional<int32_t> compressor_message;
+      int res = hw->compress(in, out, compressor_message);
+      EXPECT_EQ(res, 0);
+      bufferlist after;
+      res = sw->decompress(out, after, compressor_message);
+      EXPECT_EQ(res, 0);
+      bufferlist exp;
+      exp.append(test, size);
+      EXPECT_TRUE(exp.contents_equal(after));
+    }
+  }
+}
+
+TEST(UADK, enc_nouadk_dec_uadk) {
+  const char* alg_collection[] = {"zlib"};
+
+  for (auto alg : alg_collection) {
+    g_conf().set_val("uadk_compressor_enabled", "true");
+    g_conf().set_val("compressor_zlib_winsize", "15");
+    g_ceph_context->_conf.apply_changes(nullptr);
+    CompressorRef hw = Compressor::create(g_ceph_context, alg);
+    if (hw == NULL) 
+      return;
+    g_conf().set_val("uadk_compressor_enabled", "false");
+    g_conf().set_val("compressor_zlib_winsize", "15");
+    g_ceph_context->_conf.apply_changes(nullptr);
+    CompressorRef sw = Compressor::create(g_ceph_context, alg);
+
+    //generate random buffer
+    for (int cnt = 0; cnt < 100; cnt++) {
+      srand(cnt + 1000);
+      int log2 = (rand()%18) +1;
+      int size = (rand() % (1 << log2)) + 1;
+
+      char test[size];
+      for (int i = 0; i < size; ++i)
+        test[i] = rand()%256;
+      bufferlist in, out;
+      in.append(test, size);
+
+      std::optional<int32_t> compressor_message;
+      int res = sw->compress(in, out, compressor_message);
+      EXPECT_EQ(res, 0);
+      bufferlist after;
+      res = hw->decompress(out, after, compressor_message);
+      EXPECT_EQ(res, 0);
+      bufferlist exp;
+      exp.append(test, size);
+      EXPECT_TRUE(exp.contents_equal(after));
+    }
+  }
+}
+
+#endif //HAVE_UADK

@@ -35,6 +35,37 @@ WRITE_CLASS_DENC(bluefs_extent_t)
 
 std::ostream& operator<<(std::ostream& out, const bluefs_extent_t& e);
 
+struct bluefs_locked_extents_t {
+  uint64_t head_offset = 0;
+  uint32_t head_length = 0;
+
+  uint64_t gray_tail_offset = 0;
+  uint32_t gray_tail_length = 0;
+
+  uint64_t tail_offset = 0;
+  uint32_t tail_length = 0;
+
+  bluefs_locked_extents_t() {}
+  bluefs_locked_extents_t(uint64_t head_reserved, uint64_t full_size, uint64_t alloc_size);
+
+  void reset() {
+    *this = bluefs_locked_extents_t();
+  }
+  uint64_t head_end() const { return head_offset + head_length; }
+  uint64_t gray_tail_end() const { return gray_tail_offset + gray_tail_length; }
+  uint64_t tail_end() const { return tail_offset + tail_length; }
+
+  void reset_intersected(const bluefs_extent_t& e);
+
+  // returns extents in a form where tails are merged
+  bluefs_locked_extents_t get_merged() const;
+
+  // returns final locked extents where head/tail are present only
+  bluefs_locked_extents_t finalize() const;
+};
+
+std::ostream& operator<<(std::ostream& out, const bluefs_locked_extents_t& e);
+
 struct bluefs_fnode_delta_t {
   uint64_t ino;
   uint64_t size;
@@ -62,7 +93,7 @@ struct bluefs_fnode_t {
   uint64_t ino;
   uint64_t size;
   utime_t mtime;
-  uint8_t __unused__; // was prefer_bdev
+  uint8_t __unused__ = 0; // was prefer_bdev
   mempool::bluefs::vector<bluefs_extent_t> extents;
 
   // precalculated logical offsets for extents vector entries
@@ -72,7 +103,15 @@ struct bluefs_fnode_t {
   uint64_t allocated;
   uint64_t allocated_commited;
 
-  bluefs_fnode_t() : ino(0), size(0), __unused__(0), allocated(0), allocated_commited(0) {}
+  bluefs_fnode_t() : ino(0), size(0), allocated(0), allocated_commited(0) {}
+  bluefs_fnode_t(uint64_t _ino, uint64_t _size, utime_t _mtime) :
+    ino(_ino), size(_size), mtime(_mtime), allocated(0), allocated_commited(0) {}
+  bluefs_fnode_t(const bluefs_fnode_t& other) :
+    ino(other.ino), size(other.size), mtime(other.mtime),
+    allocated(other.allocated),
+    allocated_commited(other.allocated_commited) {
+    clone_extents(other);
+  }
 
   uint64_t get_allocated() const {
     return allocated;
@@ -81,6 +120,7 @@ struct bluefs_fnode_t {
   void recalc_allocated() {
     allocated = 0;
     extents_index.reserve(extents.size());
+    extents_index.clear();
     for (auto& p : extents) {
       extents_index.emplace_back(allocated);
       allocated += p.length;
@@ -111,9 +151,13 @@ struct bluefs_fnode_t {
     denc(v.extents, p);
     DENC_FINISH(p);
   }
-
   void reset_delta() {
     allocated_commited = allocated;
+  }
+  void clone_extents(const bluefs_fnode_t& fnode) {
+    for (const auto& p : fnode.extents) {
+      append_extent(p);
+    }
   }
   void claim_extents(mempool::bluefs::vector<bluefs_extent_t>& extents) {
     for (const auto& p : extents) {
@@ -144,6 +188,12 @@ struct bluefs_fnode_t {
     extents.erase(it);
   }
   
+  void swap(bluefs_fnode_t& other) {
+    std::swap(ino, other.ino);
+    std::swap(size, other.size);
+    std::swap(mtime, other.mtime);
+    swap_extents(other);
+  }
   void swap_extents(bluefs_fnode_t& other) {
     other.extents.swap(extents);
     other.extents_index.swap(extents_index);
@@ -187,22 +237,21 @@ struct bluefs_layout_t {
   void encode(ceph::buffer::list& bl) const;
   void decode(ceph::buffer::list::const_iterator& p);
   void dump(ceph::Formatter *f) const;
+  static void generate_test_instances(std::list<bluefs_layout_t*>& ls);
 };
 WRITE_CLASS_ENCODER(bluefs_layout_t)
 
 struct bluefs_super_t {
   uuid_d uuid;      ///< unique to this bluefs instance
   uuid_d osd_uuid;  ///< matches the osd that owns us
-  uint64_t version;
+  uint64_t seq;     ///< sequence counter
   uint32_t block_size;
 
   bluefs_fnode_t log_fnode;
 
   std::optional<bluefs_layout_t> memorized_layout;
 
-  bluefs_super_t()
-    : version(0),
-      block_size(4096) { }
+  bluefs_super_t();
 
   uint64_t block_mask() const {
     return ~((uint64_t)block_size - 1);
@@ -285,10 +334,12 @@ struct bluefs_transaction_t {
   void op_file_update_inc(bluefs_fnode_t& file) {
     using ceph::encode;
     bluefs_fnode_delta_t delta;
-    file.make_delta(&delta); //also resets delta to zero
+    file.make_delta(&delta);
     encode((__u8)OP_FILE_UPDATE_INC, op_bl);
     encode(delta, op_bl);
+    file.reset_delta();
   }
+
   void op_file_remove(uint64_t ino) {
     using ceph::encode;
     encode((__u8)OP_FILE_REMOVE, op_bl);
@@ -309,6 +360,7 @@ struct bluefs_transaction_t {
     op_bl.claim_append(from.op_bl);
   }
 
+  void bound_encode(size_t &s) const;
   void encode(ceph::buffer::list& bl) const;
   void decode(ceph::buffer::list::const_iterator& p);
   void dump(ceph::Formatter *f) const;

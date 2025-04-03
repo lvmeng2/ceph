@@ -1,4 +1,4 @@
-// -*- mode:C++; tab-width:8; c-basic-index:2; indent-tabs-mode:t -*-
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
 // vim: ts=8 sw=2 smarttab
 
 #pragma once
@@ -377,13 +377,9 @@ public:
       return index > rhs.index;
     }
 
-    bool operator==(const iter_t &rhs) const {
-      assert(node == rhs.node);
-      return rhs.index == index;
-    }
-
-    bool operator!=(const iter_t &rhs) const {
-      return !(*this == rhs);
+    friend bool operator==(const iter_t &lhs, const iter_t &rhs) {
+      assert(lhs.node == rhs.node);
+      return lhs.index == rhs.index;
     }
 
   private:
@@ -401,7 +397,7 @@ public:
       return get_node_key().key_off;
     }
     auto get_node_val_ptr() const {
-      auto tail = node->buf + OMAP_BLOCK_SIZE;
+      auto tail = node->buf + OMAP_INNER_BLOCK_SIZE;
       if (*this == node->iter_end())
         return tail;
       else {
@@ -416,7 +412,7 @@ public:
         return (*this - 1)->get_node_val_offset();
     }
     auto get_right_ptr_end() const {
-      return node->buf + OMAP_BLOCK_SIZE - get_right_offset_end();
+      return node->buf + OMAP_INNER_BLOCK_SIZE - get_right_offset_end();
     }
 
     void update_offset(int offset) {
@@ -438,8 +434,8 @@ public:
       static_assert(!is_const);
       assert(str.size() == get_node_key().key_len);
       assert(get_node_key().key_off >= str.size());
-      assert(get_node_key().key_off < OMAP_BLOCK_SIZE);
-      assert(str.size() < OMAP_BLOCK_SIZE);
+      assert(get_node_key().key_off < OMAP_INNER_BLOCK_SIZE);
+      assert(str.size() < OMAP_INNER_BLOCK_SIZE);
       ::memcpy(get_node_val_ptr(), str.data(), str.size());
     }
 
@@ -508,8 +504,13 @@ public:
     inner_remove(iter);
   }
 
-  StringKVInnerNodeLayout(char *buf) :
-    buf(buf) {}
+  StringKVInnerNodeLayout() : buf(nullptr) {}
+
+  void set_layout_buf(char *_buf) {
+    assert(buf == nullptr);
+    assert(_buf != nullptr);
+    buf = _buf;
+  }
 
   uint32_t get_size() const {
     ceph_le32 &size = *layout.template Pointer<0>(buf);
@@ -596,13 +597,11 @@ public:
   }
 
   const_iterator find_string_key(std::string_view str) const {
-    auto ret = iter_begin();
-    for (; ret != iter_end(); ++ret) {
-     std::string s = ret->get_key();
-      if (s == str)
-        break;
+    auto iter = string_lower_bound(str);
+    if (iter.get_key() == str) {
+      return iter;
     }
-    return ret;
+    return iter_cend();
   }
 
   iterator find_string_key(std::string_view str) {
@@ -656,13 +655,19 @@ public:
   }
 
   uint16_t capacity() const {
-    return OMAP_BLOCK_SIZE - (reinterpret_cast<char*>(layout.template Pointer<2>(buf))-
-                        reinterpret_cast<char*>(layout.template Pointer<0>(buf)));
+    return OMAP_INNER_BLOCK_SIZE
+      - (reinterpret_cast<char*>(layout.template Pointer<2>(buf))
+      - reinterpret_cast<char*>(layout.template Pointer<0>(buf)));
   }
 
   bool is_overflow(size_t ksize) const {
     return free_space() < (sizeof(omap_inner_key_le_t) + ksize);
   }
+
+  bool is_overflow(const StringKVInnerNodeLayout &rhs) const {
+    return free_space() < rhs.used_space();
+  }
+
   bool below_min() const {
     return free_space() > (capacity() / 2);
   }
@@ -908,6 +913,7 @@ private:
  */
 class StringKVLeafNodeLayout {
   char *buf = nullptr;
+  extent_len_t len = 0;
 
   using L = absl::container_internal::Layout<ceph_le32, omap_node_meta_le_t, omap_leaf_key_le_t>;
   static constexpr L layout{1, 1, 1}; // = L::Partial(1, 1, 1);
@@ -1007,7 +1013,7 @@ public:
       return get_node_key().key_off;
     }
     auto get_node_val_ptr() const {
-      auto tail = node->buf + OMAP_BLOCK_SIZE;
+      auto tail = node->buf + node->len;
       if (*this == node->iter_end())
         return tail;
       else {
@@ -1022,7 +1028,7 @@ public:
         return (*this - 1)->get_node_val_offset();
     }
     auto get_right_ptr_end() const {
-      return node->buf + OMAP_BLOCK_SIZE - get_right_offset_end();
+      return node->buf + node->len - get_right_offset_end();
     }
 
     void update_offset(int offset) {
@@ -1118,8 +1124,15 @@ public:
     leaf_remove(iter);
   }
 
-  StringKVLeafNodeLayout(char *buf) :
-    buf(buf) {}
+  StringKVLeafNodeLayout() : buf(nullptr) {}
+
+  void set_layout_buf(char *_buf, extent_len_t _len) {
+    assert(_len > 0);
+    assert(buf == nullptr);
+    assert(_buf != nullptr);
+    buf = _buf;
+    len = _len;
+  }
 
   const_iterator iter_begin() const {
     return const_iterator(
@@ -1262,13 +1275,24 @@ public:
   }
 
   uint32_t capacity() const {
-    return OMAP_BLOCK_SIZE - (reinterpret_cast<char*>(layout.template Pointer<2>(buf))-
-                        reinterpret_cast<char*>(layout.template Pointer<0>(buf)));
+    return len
+      - (reinterpret_cast<char*>(layout.template Pointer<2>(buf))
+      - reinterpret_cast<char*>(layout.template Pointer<0>(buf)));
+  }
+
+  auto get_len() const {
+    assert(len > 0);
+    return len;
   }
 
   bool is_overflow(size_t ksize, size_t vsize) const {
     return free_space() < (sizeof(omap_leaf_key_le_t) + ksize + vsize);
   }
+
+  bool is_overflow(const StringKVLeafNodeLayout &rhs) const {
+    return free_space() < rhs.used_space();
+  }
+
   bool below_min() const {
     return free_space() > (capacity() / 2);
   }

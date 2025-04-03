@@ -2,41 +2,34 @@
 
 set -eEx
 
-cleanup() {
-    set +x
-    if [[ -n "$JENKINS_HOME" ]]; then
-        printf "\n\nStarting cleanup...\n\n"
-        kcli delete plan -y ceph || true
-        kcli delete network ceph-dashboard -y
-        docker container prune -f
-        printf "\n\nCleanup completed.\n\n"
-    fi
-}
-
 on_error() {
     set +x
     if [ "$1" != "0" ]; then
-        printf "\n\nERROR $1 thrown on line $2\n\n"
-        printf "\n\nCollecting info...\n\n"
-        printf "\n\nDisplaying MGR logs:\n\n"
-        kcli ssh -u root -- ceph-node-00 'cephadm logs -n \$(cephadm ls | grep -Eo "mgr\.ceph[0-9a-z.-]+" | head -n 1) -- --no-tail --no-pager'
-        for vm_id in 0 1 2
+        echo "ERROR $1 thrown on line $2"
+        echo
+        echo "Collecting info..."
+        echo
+        echo "Saving MGR logs:"
+        echo
+        mkdir -p ${CEPH_DEV_FOLDER}/logs
+        kcli ssh -u root -- ceph-node-00 'cephadm logs -n \$(cephadm ls | grep -Eo "mgr\.ceph[0-9a-z.-]+" | head -n 1) -- --no-tail --no-pager' > ${CEPH_DEV_FOLDER}/logs/mgr.cephadm.log
+        for vm_id in {0..3}
         do
             local vm="ceph-node-0${vm_id}"
-            printf "\n\nDisplaying journalctl from VM ${vm}:\n\n"
-            kcli ssh -u root -- ${vm} 'journalctl --no-tail --no-pager -t cloud-init' || true
-            printf "\n\nEnd of journalctl from VM ${vm}\n\n"
-            printf "\n\nDisplaying container logs:\n\n"
-            kcli ssh -u root -- ${vm} 'podman logs --names --since 30s \$(podman ps -aq)' || true
+            echo "Saving journalctl from VM ${vm}:"
+            echo
+            kcli ssh -u root -- ${vm} 'journalctl --no-tail --no-pager -t cloud-init' > ${CEPH_DEV_FOLDER}/logs/journal.ceph-node-0${vm_id}.log || true
+            echo "Saving container logs:"
+            echo
+            kcli ssh -u root -- ${vm} 'podman logs --names --since 30s \$(podman ps -aq)' > ${CEPH_DEV_FOLDER}/logs/container.ceph-node-0${vm_id}.log || true
         done
-        printf "\n\nTEST FAILED.\n\n"
+        echo "TEST FAILED."
     fi
 }
 
 trap 'on_error $? $LINENO' ERR
-trap 'cleanup $? $LINENO' EXIT
 
-sed -i '/ceph-node-/d' $HOME/.ssh/known_hosts
+sed -i '/ceph-node-/d' $HOME/.ssh/known_hosts || true
 
 : ${CEPH_DEV_FOLDER:=${PWD}}
 EXTRA_PARAMS=''
@@ -59,17 +52,21 @@ if [[ -n "$JENKINS_HOME" ]]; then
     npm cache clean --force
 fi
 npm ci
-FRONTEND_BUILD_OPTS='-- --prod'
+FRONTEND_BUILD_OPTS='--configuration=production'
 if [[ -n "${DEV_MODE}" ]]; then
     FRONTEND_BUILD_OPTS+=' --deleteOutputPath=false --watch'
 fi
 npm run build ${FRONTEND_BUILD_OPTS} &
 
 cd ${CEPH_DEV_FOLDER}
-: ${VM_IMAGE:='fedora34'}
-: ${VM_IMAGE_URL:='https://fedora.mirror.liteserver.nl/linux/releases/34/Cloud/x86_64/images/Fedora-Cloud-Base-34-1.2.x86_64.qcow2'}
+: ${VM_IMAGE:='fedora40'}
+: ${VM_IMAGE_URL:='https://download.fedoraproject.org/pub/fedora/linux/releases/40/Cloud/x86_64/images/Fedora-Cloud-Base-Generic.x86_64-40-1.14.qcow2'}
 kcli download image -p ceph-dashboard -u ${VM_IMAGE_URL} ${VM_IMAGE}
 kcli delete plan -y ceph || true
+# Compile cephadm locally for the shared_ceph_folder to pick it up
+cd ${CEPH_DEV_FOLDER}/src/cephadm
+./build.sh ${CEPH_DEV_FOLDER}/src/cephadm/cephadm
+cd ${CEPH_DEV_FOLDER}
 kcli create plan -f src/pybind/mgr/dashboard/ci/cephadm/ceph_cluster.yml \
     -P ceph_dev_folder=${CEPH_DEV_FOLDER} \
     ${EXTRA_PARAMS} ceph
@@ -85,3 +82,37 @@ while [[ -z $(kcli ssh -u root -- ceph-node-00 'journalctl --no-tail --no-pager 
     fi
     kcli ssh -u root -- ceph-node-00 'journalctl -n 100 --no-pager -t cloud-init'
 done
+
+kcli ssh -u root ceph-node-00 'cephadm shell "ceph config set mgr mgr/prometheus/exclude_perf_counters false"'
+
+get_prometheus_running_count() {
+    echo $(kcli ssh -u root ceph-node-00 'cephadm shell "ceph orch ls --service_name=prometheus --format=json"' | jq -r '.[] | .status.running')
+}
+
+# check if the prometheus daemon is running on jenkins node
+# before starting the e2e tests
+if [[ -n "${JENKINS_HOME}" ]]; then
+    retry=0
+    PROMETHEUS_RUNNING_COUNT=$(get_prometheus_running_count)
+    # retrying for 10 times to see if we can get the prometheus count
+    # otherwise this would run indefinitely and bloat up the machine
+    while [[ $retry -lt 10 && $PROMETHEUS_RUNNING_COUNT -lt 1 ]]; do
+        if [[ ${retry} -gt 0 ]]; then
+            echo "Retry attempt to get the prometheus count..." ${retry}
+        fi
+        PROMETHEUS_RUNNING_COUNT=$(get_prometheus_running_count)
+        retry=$((retry +1))
+        sleep 10
+    done
+
+    if [[ ${retry} -ge 10 ]]; then
+        exit 1
+    fi
+
+    # grafana ip address is set to the fqdn by default.
+    # kcli is not working with that, so setting the IP manually.
+    kcli ssh -u root ceph-node-00 'cephadm shell "ceph dashboard set-alertmanager-api-host http://192.168.100.100:9093"'
+    kcli ssh -u root ceph-node-00 'cephadm shell "ceph dashboard set-prometheus-api-host http://192.168.100.100:9095"'
+    kcli ssh -u root ceph-node-00 'cephadm shell "ceph dashboard set-grafana-api-url https://192.168.100.100:3000"'
+    kcli ssh -u root ceph-node-00 'cephadm shell "ceph orch apply node-exporter --placement 'count:2'"'
+fi

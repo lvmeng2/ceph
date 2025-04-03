@@ -7,7 +7,8 @@ html {
 
 html,
 body {
-  font-size: 12px;
+  // WARNING: This was clashing with Carbon's font-size
+  font-size: 16px;
   height: 100%;
   width: 100%;
 }
@@ -15,6 +16,11 @@ body {
 option {
   font-style: normal;
   font-weight: normal;
+}
+
+mark {
+  background-color: vv.$yellow;
+  padding: 0;
 }
 
 .full-height {
@@ -96,4 +102,19 @@ option {
 
 .border-success {
   border-left: 4px solid vv.$success;
+}
+
+.vertical-line {
+  border-left: 1px solid vv.$gray-400;
+}
+
+a.nav-link {
+  color: vv.$primary;
+}
+
+// Should be removed once bootstrap is completely removed from the code
+// for more info: https://github.com/ceph/ceph/pull/58478#pullrequestreview-2254120764
+ol,
+ul {
+  padding-left: 0;
 }

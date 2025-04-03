@@ -29,8 +29,10 @@
 #include "MDLog.h"
 #include "LogSegment.h"
 #include "MDBalancer.h"
+#include "SnapClient.h"
 
 #include "common/bloom_filter.hpp"
+#include "common/likely.h"
 #include "include/Context.h"
 #include "common/Clock.h"
 
@@ -178,7 +180,7 @@ ostream& operator<<(ostream& out, const CDir& dir)
 }
 
 
-void CDir::print(ostream& out) 
+void CDir::print(ostream& out) const
 {
   out << *this;
 }
@@ -186,7 +188,7 @@ void CDir::print(ostream& out)
 
 
 
-ostream& CDir::print_db_line_prefix(ostream& out) 
+ostream& CDir::print_db_line_prefix(ostream& out) const
 {
   return out << ceph_clock_now() << " mds." << mdcache->mds->get_nodeid() << ".cache.dir(" << this->dirfrag() << ") ";
 }
@@ -208,7 +210,6 @@ CDir::CDir(CInode *in, frag_t fg, MDCache *mdc, bool auth) :
   pop_nested(mdc->decayrate),
   pop_auth_subtree(mdc->decayrate),
   pop_auth_subtree_nested(mdc->decayrate),
-  pop_spread(mdc->decayrate),
   pop_lru_subdirs(member_offset(CInode, item_pop_lru)),
   dir_auth(CDIR_AUTH_DEFAULT)
 {
@@ -249,7 +250,7 @@ bool CDir::check_rstats(bool scrub)
 	frag_info.nsubdirs++;
       else
 	frag_info.nfiles++;
-    } else if (dnl->is_remote())
+    } else if (dnl->is_remote() || dnl->is_referent_remote())
       frag_info.nfiles++;
   }
 
@@ -342,7 +343,7 @@ void CDir::adjust_dentry_lru(CDentry *dn)
   bool bottom_lru;
   if (dn->get_linkage()->is_primary()) {
     bottom_lru = !is_auth() && inode->is_stray();
-  } else if (dn->get_linkage()->is_remote()) {
+  } else if (dn->get_linkage()->is_remote() || dn->get_linkage()->is_referent_remote()) { //TODO Is this right for referent remote?
     bottom_lru = false;
   } else {
     bottom_lru = !is_auth();
@@ -374,6 +375,9 @@ CDentry* CDir::add_null_dentry(std::string_view dname,
    
   // create dentry
   CDentry* dn = new CDentry(dname, inode->hash_dentry_name(dname), "", first, last);
+  dn->dir = this;
+  dn->version = get_projected_version();
+  dn->check_corruption(true);
   if (is_auth()) {
     dn->state_set(CDentry::STATE_AUTH);
     mdcache->lru.lru_insert_mid(dn);
@@ -381,9 +385,6 @@ CDentry* CDir::add_null_dentry(std::string_view dname,
     mdcache->bottom_lru.lru_insert_mid(dn);
     dn->state_set(CDentry::STATE_BOTTOMLRU);
   }
-
-  dn->dir = this;
-  dn->version = get_projected_version();
   
   // add to dir
   ceph_assert(items.count(dn->key()) == 0);
@@ -420,6 +421,9 @@ CDentry* CDir::add_primary_dentry(std::string_view dname, CInode *in,
   
   // create dentry
   CDentry* dn = new CDentry(dname, inode->hash_dentry_name(dname), std::move(alternate_name), first, last);
+  dn->dir = this;
+  dn->version = get_projected_version();
+  dn->check_corruption(true);
   if (is_auth()) 
     dn->state_set(CDentry::STATE_AUTH);
   if (is_auth() || !inode->is_stray()) {
@@ -429,9 +433,6 @@ CDentry* CDir::add_primary_dentry(std::string_view dname, CInode *in,
     dn->state_set(CDentry::STATE_BOTTOMLRU);
   }
 
-  dn->dir = this;
-  dn->version = get_projected_version();
-  
   // add to dir
   ceph_assert(items.count(dn->key()) == 0);
   //assert(null_items.count(dn->get_name()) == 0);
@@ -461,27 +462,37 @@ CDentry* CDir::add_primary_dentry(std::string_view dname, CInode *in,
   return dn;
 }
 
-CDentry* CDir::add_remote_dentry(std::string_view dname, inodeno_t ino, unsigned char d_type,
-                                 mempool::mds_co::string alternate_name,
+// This also adds referent remote if referent inode is passed
+CDentry* CDir::add_remote_dentry(std::string_view dname, CInode *ref_in, inodeno_t ino,
+                                 unsigned char d_type, mempool::mds_co::string alternate_name,
 				 snapid_t first, snapid_t last) 
 {
   // foreign
   ceph_assert(lookup_exact_snap(dname, last) == 0);
 
+  inodeno_t referent_ino = ref_in ? ref_in->ino() : inodeno_t(0);
+
   // create dentry
-  CDentry* dn = new CDentry(dname, inode->hash_dentry_name(dname), std::move(alternate_name), ino, d_type, first, last);
+  CDentry* dn = new CDentry(dname, inode->hash_dentry_name(dname), std::move(alternate_name), ino, referent_ino, d_type, first, last);
+  dn->dir = this;
+  dn->version = get_projected_version();
+  dn->check_corruption(true);
   if (is_auth()) 
     dn->state_set(CDentry::STATE_AUTH);
   mdcache->lru.lru_insert_mid(dn);
-
-  dn->dir = this;
-  dn->version = get_projected_version();
   
   // add to dir
   ceph_assert(items.count(dn->key()) == 0);
   //assert(null_items.count(dn->get_name()) == 0);
 
   items[dn->key()] = dn;
+
+  //link referent inode
+  if (ref_in) {
+    dn->get_linkage()->referent_inode = ref_in;
+    link_inode_work(dn, ref_in);
+  }
+
   if (last == CEPH_NOSNAP)
     num_head_items++;
   else
@@ -509,7 +520,7 @@ void CDir::remove_dentry(CDentry *dn)
   dout(12) << __func__ << " " << *dn << dendl;
 
   // there should be no client leases at this point!
-  ceph_assert(dn->client_lease_map.empty());
+  ceph_assert(dn->client_leases.empty());
 
   if (state_test(CDir::STATE_DNPINNEDFRAG)) {
     dn->put(CDentry::PIN_FRAGMENTING);
@@ -580,6 +591,64 @@ void CDir::link_remote_inode(CDentry *dn, inodeno_t ino, unsigned char d_type)
   ceph_assert(get_num_any() == items.size());
 }
 
+void CDir::link_null_referent_inode(CDentry *dn, inodeno_t referent_ino, inodeno_t rino, unsigned char d_type)
+{
+  dout(12) << __func__ << " " << *dn << " referent_ino " << referent_ino << " remote " << rino << dendl;
+  ceph_assert(dn->get_linkage()->is_null());
+
+  dn->get_linkage()->set_remote(rino, d_type);
+  dn->get_linkage()->referent_ino = referent_ino;
+}
+
+/*
+ * The linking fun - It can be done in following different ways
+ *   1. add_remote_dentry()
+ *           - single step, if referent CInode is available and dentry needs to be created.
+ *   2. link_referent_inode()
+ *           - if referent CInode is available and dentry needs to be created, usually in
+ *           referent inode creation phase.
+ *           e.g., pop_projected_linkage() preceded by push_projected_linkage()
+ *   3. add_null_dentry() -> link_referent_inode()
+ *           - two step, if referent CInode is not available and dentry needs to be created,
+ *           usually in journal replay.
+ *   4. link_null_referent_inode() -> link_referent_inode()
+ *           - two step, if referent CInode is not available and dentry exists, usually in
+ *           migration.
+ *           e.g., decode_replica_dentry() followed by decode_replica_inode()
+ */
+void CDir::link_referent_inode(CDentry *dn, CInode *ref_in, inodeno_t rino, unsigned char d_type)
+{
+  ceph_assert(ref_in);
+  dout(12) << __func__ << " " << *dn << " remote " << rino << " referent inode " << *ref_in << dendl;
+
+  // The link_referent_inode could be called after add_null_dentry or link_null_referent_inode.
+  // So linkage need not be always null
+  ceph_assert(dn->get_linkage()->is_null() || dn->get_linkage()->get_referent_ino() > 0);
+  ceph_assert(!dn->get_linkage()->get_referent_inode());
+
+  // set linkage
+  dn->get_linkage()->set_remote(rino, d_type);
+  dn->get_linkage()->referent_inode = ref_in;
+  dn->get_linkage()->referent_ino = ref_in->ino();
+
+  link_inode_work(dn, ref_in);
+
+  if (dn->state_test(CDentry::STATE_BOTTOMLRU)) {
+    mdcache->bottom_lru.lru_remove(dn);
+    mdcache->lru.lru_insert_mid(dn);
+    dn->state_clear(CDentry::STATE_BOTTOMLRU);
+  }
+
+  if (dn->last == CEPH_NOSNAP) {
+    num_head_items++;
+    num_head_null--;
+  } else {
+    num_snap_items++;
+    num_snap_null--;
+  }
+  ceph_assert(get_num_any() == items.size());
+}
+
 void CDir::link_primary_inode(CDentry *dn, CInode *in)
 {
   dout(12) << __func__ << " " << *dn << " " << *in << dendl;
@@ -609,7 +678,7 @@ void CDir::link_primary_inode(CDentry *dn, CInode *in)
 
 void CDir::link_inode_work( CDentry *dn, CInode *in)
 {
-  ceph_assert(dn->get_linkage()->get_inode() == in);
+  ceph_assert(dn->get_linkage()->get_inode() == in || dn->get_linkage()->get_referent_inode() == in);
   in->set_primary_parent(dn);
 
   // set inode version
@@ -638,6 +707,11 @@ void CDir::link_inode_work( CDentry *dn, CInode *in)
     in->snaprealm->adjust_parent();
   else if (in->is_any_caps())
     in->move_to_realm(inode->find_snaprealm());
+
+  bool is_quiesced = inode->is_quiesced();
+  if (is_quiesced) {
+    mdcache->add_quiesce(inode, in);
+  }
 }
 
 void CDir::unlink_inode(CDentry *dn, bool adjust_lru)
@@ -699,6 +773,35 @@ void CDir::unlink_inode_work(CDentry *dn)
       dn->unlink_remote(dn->get_linkage());
 
     dn->get_linkage()->set_remote(0, 0);
+  } else if(dn->get_linkage()->is_referent_remote()) {
+      // referent remote
+      CInode *ref_in = dn->get_linkage()->get_referent_inode();
+
+      if (ref_in->get_num_ref())
+        dn->put(CDentry::PIN_INODEPIN);
+
+      if (ref_in->state_test(CInode::STATE_TRACKEDBYOFT))
+        mdcache->open_file_table.notify_unlink(ref_in);
+      if (ref_in->is_any_caps())
+        adjust_num_inodes_with_caps(-1);
+
+      // unlink auth_pin count
+      if (ref_in->auth_pins)
+        dn->adjust_nested_auth_pins(-ref_in->auth_pins, nullptr);
+
+      if (ref_in->is_freezing_inode())
+        ref_in->item_freezing_inode.remove_myself();
+      else if (ref_in->is_frozen_inode() || ref_in->is_frozen_auth_pin())
+        num_frozen_inodes--;
+
+      // detach inode
+      ref_in->remove_primary_parent(dn);
+      if (in)
+        dn->unlink_remote(dn->get_linkage());
+
+      dn->get_linkage()->set_remote(0, 0);
+      dn->get_linkage()->referent_inode = 0;
+      dn->get_linkage()->referent_ino = 0;
   } else if (dn->get_linkage()->is_primary()) {
     // primary
     // unpin dentry?
@@ -829,7 +932,9 @@ void CDir::try_remove_dentries_for_stray()
 
 bool CDir::try_trim_snap_dentry(CDentry *dn, const set<snapid_t>& snaps)
 {
-  ceph_assert(dn->last != CEPH_NOSNAP);
+  if (dn->last == CEPH_NOSNAP) {
+    return false;
+  }
   set<snapid_t>::const_iterator p = snaps.lower_bound(dn->first);
   CDentry::linkage_t *dnl= dn->get_linkage();
   CInode *in = 0;
@@ -849,23 +954,6 @@ bool CDir::try_trim_snap_dentry(CDentry *dn, const set<snapid_t>& snaps)
     return true;
   }
   return false;
-}
-
-
-void CDir::purge_stale_snap_data(const set<snapid_t>& snaps)
-{
-  dout(10) << __func__ << " " << snaps << dendl;
-
-  auto p = items.begin();
-  while (p != items.end()) {
-    CDentry *dn = p->second;
-    ++p;
-
-    if (dn->last == CEPH_NOSNAP)
-      continue;
-
-    try_trim_snap_dentry(dn, snaps);
-  }
 }
 
 
@@ -919,7 +1007,7 @@ void CDir::steal_dentry(CDentry *dn)
       // move dirty inode rstat to new dirfrag
       if (in->is_dirty_rstat())
 	dirty_rstat_inodes.push_back(&in->dirty_rstat_item);
-    } else if (dn->get_linkage()->is_remote()) {
+    } else if (dn->get_linkage()->is_remote() || dn->get_linkage()->is_referent_remote()) {
       if (dn->get_linkage()->get_remote_d_type() == DT_DIR)
 	_fnode->fragstat.nsubdirs++;
       else
@@ -1025,6 +1113,12 @@ void CDir::init_fragment_pins()
     get(PIN_IMPORTBOUND);
   if (is_subtree_root())
     get(PIN_SUBTREE);
+}
+
+bool CDir::should_split() const {
+  uint64_t split_size = mdcache->mds->balancer->get_bal_split_size();
+  uint64_t items = get_frag_size() + get_num_snap_items();
+  return split_size > 0 && items > split_size;
 }
 
 void CDir::split(int bits, std::vector<CDir*>* subs, MDSContext::vec& waiters, bool replay)
@@ -1322,7 +1416,7 @@ void CDir::take_dentry_waiting(std::string_view dname, snapid_t first, snapid_t 
 	     << it->first.snapid
 	     << " on " << *this << dendl;
     std::copy(it->second.begin(), it->second.end(), std::back_inserter(ls));
-    waiting_on_dentry.erase(it++);
+    it = waiting_on_dentry.erase(it);
   }
 
   if (waiting_on_dentry.empty())
@@ -1475,6 +1569,20 @@ void CDir::mark_new(LogSegment *ls)
   mdcache->mds->queue_waiters(waiters);
 }
 
+void CDir::set_fresh_fnode(fnode_const_ptr&& ptr) {
+  ceph_assert(inode->is_auth());
+  ceph_assert(!is_projected());
+  ceph_assert(!state_test(STATE_COMMITTING));
+  reset_fnode(std::move(ptr));
+  projected_version = committing_version = committed_version = get_version();
+
+  if (state_test(STATE_REJOINUNDEF)) {
+    ceph_assert(mdcache->mds->is_rejoin());
+    state_clear(STATE_REJOINUNDEF);
+    mdcache->opened_undef_dirfrag(this);
+  }
+}
+
 void CDir::mark_clean()
 {
   dout(10) << __func__ << " " << *this << " version " << get_version() << dendl;
@@ -1547,16 +1655,9 @@ void CDir::fetch(std::string_view dname, snapid_t last,
       pdir && pdir->inode->is_stray() && !inode->snaprealm) {
     dout(7) << "fetch dirfrag for unlinked directory, mark complete" << dendl;
     if (get_version() == 0) {
-      ceph_assert(inode->is_auth());
       auto _fnode = allocate_fnode();
       _fnode->version = 1;
-      reset_fnode(std::move(_fnode));
-
-      if (state_test(STATE_REJOINUNDEF)) {
-	ceph_assert(mdcache->mds->is_rejoin());
-	state_clear(STATE_REJOINUNDEF);
-	mdcache->opened_undef_dirfrag(this);
-      }
+      set_fresh_fnode(std::move(_fnode));
     }
     mark_complete();
 
@@ -1712,7 +1813,7 @@ public:
     ret1(0), ret2(0), ret3(0) { }
   void finish(int r) override {
     // check the correctness of backtrace
-    if (r >= 0 && ret3 != -CEPHFS_ECANCELED)
+    if (r >= 0 && ret3 != -ECANCELED)
       dir->inode->verify_diri_backtrace(btbl, ret3);
     if (r >= 0) r = ret1;
     if (r >= 0) r = ret2;
@@ -1756,7 +1857,7 @@ void CDir::_omap_fetch(std::set<string> *keys, MDSContext *c)
     rd.getxattr("parent", &fin->btbl, &fin->ret3);
     rd.set_last_op_flags(CEPH_OSD_OP_FLAG_FAILOK);
   } else {
-    fin->ret3 = -CEPHFS_ECANCELED;
+    fin->ret3 = -ECANCELED;
   }
 
   mdcache->mds->objecter->read(oid, oloc, rd, CEPH_NOSNAP, NULL, 0,
@@ -1858,7 +1959,7 @@ CDentry *CDir::_load_dentry(
       }
     } else {
       // (remote) link
-      dn = add_remote_dentry(dname, ino, d_type, std::move(alternate_name), first, last);
+      dn = add_remote_dentry(dname, nullptr, ino, d_type, std::move(alternate_name), first, last);
 
       // link to inode?
       CInode *in = mdcache->get_inode(ino);   // we may or may not have it.
@@ -1869,8 +1970,130 @@ CDentry *CDir::_load_dentry(
         dout(12) << "_fetched  got remote link " << ino << " (don't have it)" << dendl;
       }
     }
-  }
-  else if (type == 'I' || type == 'i') {
+  } else if (type == 'R' || type == 'r') {
+    // hard link with referent inode
+    InodeStore inode_data;
+    inodeno_t remote_ino;
+    inodeno_t referent_ino;
+    unsigned char d_type;
+    mempool::mds_co::string alternate_name;
+
+    //Load referent inode and get remote inode details
+    if (type == 'r') {
+      DECODE_START(2, q);
+      if (struct_v >= 2) {
+        decode(alternate_name, q);
+      }
+      inode_data.decode(q);
+      DECODE_FINISH(q);
+    } else {
+      inode_data.decode_bare(q);
+    }
+
+    //Fill in remote inode details
+    remote_ino = inode_data.inode->remote_ino;
+    referent_ino = inode_data.inode->ino;
+    d_type = IFTODT(inode_data.inode->mode);
+
+    if (stale) {
+      if (!dn) {
+        stale_items.insert(mempool::mds_co::string(key));
+        *force_dirty = true;
+      }
+      return dn;
+    }
+
+    bool undef_inode = false;
+    if (dn) {
+      CDentry::linkage_t *dnl = dn->get_linkage();
+      dout(12) << __func__ << "_fetched had " << (dnl->is_null() ? "NEG" : "") << " dentry " << *dn << dendl;
+      if (dnl->is_referent_remote()) {
+	CInode *ref_in = dnl->get_referent_inode();
+	if (ref_in->state_test(CInode::STATE_REJOINUNDEF)) {
+	  undef_inode = true;
+        } else if (committed_version == 0 &&
+                   dnl->is_referent_remote() &&
+                   dn->is_dirty() &&
+                   remote_ino == dnl->get_remote_ino() &&
+                   d_type == dnl->get_remote_d_type() &&
+                   alternate_name == dn->get_alternate_name() &&
+		   referent_ino == dnl->get_referent_ino() &&
+		   referent_ino == ref_in->ino() &&
+		   inode_data.inode->version == ref_in->get_version()) {
+         // see comment below
+         dout(10) << __func__ << "_fetched  had underwater dentry " << *dn << ", marking clean" << dendl;
+         dn->mark_clean();
+	 dout(10) << __func__ << "_fetched  had underwater referent inode " << *dnl->get_referent_inode() << ", marking clean" << dendl;
+	 ref_in->mark_clean();
+       }
+     } else {
+         dout(10) << __func__ << "_fetched  dentry was present but dnl is not referent!!! " << *dn << dendl;
+     }
+   }
+
+   if (!dn || undef_inode) {
+      // (referent remote) link
+      // add referent inode
+      CInode *ref_in = mdcache->get_inode(referent_ino, last);
+      if (!ref_in || undef_inode) {
+        if (undef_inode && ref_in) {
+	  ref_in->first = first;
+        } else {
+          ref_in = new CInode(mdcache, true, first, last);
+        }
+
+        ref_in->reset_inode(std::move(inode_data.inode));
+        ref_in->reset_xattrs(std::move(inode_data.xattrs));
+
+        ref_in->dirfragtree.swap(inode_data.dirfragtree);
+        ref_in->reset_old_inodes(std::move(inode_data.old_inodes));
+        if (ref_in->is_any_old_inodes()) {
+          snapid_t min_first = ref_in->get_old_inodes()->rbegin()->first + 1;
+          if (min_first > ref_in->first)
+            ref_in->first = min_first;
+        }
+
+        ref_in->oldest_snap = inode_data.oldest_snap;
+        ref_in->decode_snap_blob(inode_data.snap_blob);
+        if (snaps && !ref_in->snaprealm)
+          ref_in->purge_stale_snap_data(*snaps);
+
+        if (!undef_inode) {
+          dout(15) << __func__ << "_fetched  referent inode created " << *ref_in << " parent " << ref_in->parent << dendl;
+          mdcache->add_inode(ref_in); // add
+          mdcache->insert_taken_inos(ref_in->ino());
+          dn = add_remote_dentry(dname, ref_in, remote_ino, d_type, std::move(alternate_name), first, last);
+        } else {
+          dout(15) << __func__ << "_fetched  referent inode found in memory " << *ref_in << " parent " << ref_in->parent << dendl;
+        }
+
+        ref_in->maybe_ephemeral_rand(rand_threshold);
+
+        // link to inode?
+        CInode *remote_in = mdcache->get_inode(remote_ino);   // we may or may not have it.
+        if (remote_in) {
+	  //referent_inode is already linked above in add_remote_dentry
+          dn->link_remote(dn->get_linkage(), remote_in, ref_in);
+          dout(12) << __func__ << "_fetched  got remote link " << remote_ino << " which we have " << *remote_in << dendl;
+        } else {
+          dout(12) << __func__ << "_fetched  got remote link " << remote_ino << " (don't have it)" << dendl;
+        }
+      } else {
+        dout(0) << __func__ << "_fetched  badness: got referent inode (but i already had) " << *ref_in
+                << " mode " << ref_in->get_inode()->mode
+                << " mtime " << ref_in->get_inode()->mtime << dendl;
+        string dirpath, inopath;
+        this->inode->make_path_string(dirpath);
+        ref_in->make_path_string(inopath);
+        mdcache->mds->clog->error() << "loaded dup referent inode " << inode_data.inode->ino
+          << " [" << first << "," << last << "] v" << inode_data.inode->version
+          << " at " << dirpath << "/" << dname
+          << ", but inode " << ref_in->vino() << " v" << ref_in->get_version()
+	  << " already exists at " << inopath;
+        return dn;
+      }
+    }
+  } else if (type == 'I' || type == 'i') {
     InodeStore inode_data;
     mempool::mds_co::string alternate_name;
     // inode
@@ -1957,6 +2180,7 @@ CDentry *CDir::_load_dentry(
 
         if (!undef_inode) {
           mdcache->add_inode(in); // add
+	  mdcache->insert_taken_inos(in->ino());
           dn = add_primary_dentry(dname, in, std::move(alternate_name), first, last); // link
         }
         dout(12) << "_fetched  got " << *dn << " " << *in << dendl;
@@ -2002,7 +2226,7 @@ void CDir::_omap_fetched(bufferlist& hdrbl, map<string, bufferlist>& omap,
   dout(10) << "_fetched header " << hdrbl.length() << " bytes "
 	   << omap.size() << " keys for " << *this << dendl;
 
-  ceph_assert(r == 0 || r == -CEPHFS_ENOENT || r == -CEPHFS_ENODATA);
+  ceph_assert(r == 0 || r == -ENOENT || r == -ENODATA);
   ceph_assert(is_auth());
   ceph_assert(!is_frozen());
 
@@ -2043,17 +2267,7 @@ void CDir::_omap_fetched(bufferlist& hdrbl, map<string, bufferlist>& omap,
   // take the loaded fnode?
   // only if we are a fresh CDir* with no prior state.
   if (get_version() == 0) {
-    ceph_assert(!is_projected());
-    ceph_assert(!state_test(STATE_COMMITTING));
-    auto _fnode = allocate_fnode(got_fnode);
-    reset_fnode(std::move(_fnode));
-    projected_version = committing_version = committed_version = get_version();
-
-    if (state_test(STATE_REJOINUNDEF)) {
-      ceph_assert(mdcache->mds->is_rejoin());
-      state_clear(STATE_REJOINUNDEF);
-      mdcache->opened_undef_dirfrag(this);
-    }
+    set_fresh_fnode(allocate_fnode(got_fnode));
   }
 
   list<CInode*> undef_inodes;
@@ -2106,6 +2320,8 @@ void CDir::_omap_fetched(bufferlist& hdrbl, map<string, bufferlist>& omap,
   };
   auto proc_nulls_and_waiters = [&](const string& str_key, const string_snap_t& key) {
     bool touch = false;
+    int count = 0;
+
     while (k_it != keys.rend()) {
       int cmp = k_it->compare(str_key);
       if (cmp < 0)
@@ -2123,10 +2339,14 @@ void CDir::_omap_fetched(bufferlist& hdrbl, map<string, bufferlist>& omap,
       last_name = std::string_view(k_it->c_str(), n_key.name.length());
       null_keys.emplace_back(std::move(n_key));
       ++k_it;
+
+      if (!(++count % mdcache->mds->heartbeat_reset_grace()))
+        mdcache->mds->heartbeat_reset();
     }
     return touch;
   };
 
+  int count = 0;
   unsigned pos = omap.size() - 1;
   double rand_threshold = get_inode()->get_ephemeral_rand();
   for (auto p = omap.rbegin(); p != omap.rend(); ++p, --pos) {
@@ -2143,6 +2363,9 @@ void CDir::_omap_fetched(bufferlist& hdrbl, map<string, bufferlist>& omap,
       last_name = std::string_view(p->first.c_str(), key.name.length());
     }
 
+    if (!(++count % mdcache->mds->heartbeat_reset_grace()))
+      mdcache->mds->heartbeat_reset();
+
     CDentry *dn = nullptr;
     try {
       dn = _load_dentry(
@@ -2154,7 +2377,7 @@ void CDir::_omap_fetched(bufferlist& hdrbl, map<string, bufferlist>& omap,
                                << err.what() << "(" << get_path() << ")";
 
       // Remember that this dentry is damaged.  Subsequent operations
-      // that try to act directly on it will get their CEPHFS_EIOs, but this
+      // that try to act directly on it will get their EIOs, but this
       // dirfrag as a whole will continue to look okay (minus the
       // mysteriously-missing dentry)
       go_bad_dentry(key.snapid, key.name);
@@ -2177,6 +2400,8 @@ void CDir::_omap_fetched(bufferlist& hdrbl, map<string, bufferlist>& omap,
     CDentry::linkage_t *dnl = dn->get_linkage();
     if (dnl->is_primary() && dnl->get_inode()->state_test(CInode::STATE_REJOINUNDEF))
       undef_inodes.push_back(dnl->get_inode());
+    if (dnl->is_referent_remote() && dnl->get_referent_inode()->state_test(CInode::STATE_REJOINUNDEF))
+      undef_inodes.push_back(dnl->get_referent_inode());
   }
 
   if (complete) {
@@ -2204,6 +2429,9 @@ void CDir::_omap_fetched(bufferlist& hdrbl, map<string, bufferlist>& omap,
 	dout(12) << "_fetched got null for key " << key << ", added " << *dn << dendl;
       }
       mdcache->touch_dentry(dn);
+
+      if (!(++count % mdcache->mds->heartbeat_reset_grace(2)))
+        mdcache->mds->heartbeat_reset();
     }
   }
 
@@ -2219,9 +2447,13 @@ void CDir::_omap_fetched(bufferlist& hdrbl, map<string, bufferlist>& omap,
   // open & force frags
   while (!undef_inodes.empty()) {
     CInode *in = undef_inodes.front();
+
     undef_inodes.pop_front();
     in->state_clear(CInode::STATE_REJOINUNDEF);
     mdcache->opened_undef_inode(in);
+
+    if (!(++count % mdcache->mds->heartbeat_reset_grace()))
+      mdcache->mds->heartbeat_reset();
   }
 
   // dirty myself to remove stale snap dentries
@@ -2271,7 +2503,7 @@ void CDir::go_bad(bool complete)
 
   state_clear(STATE_FETCHING);
   auth_unpin(this);
-  finish_waiting(WAIT_COMPLETE, -CEPHFS_EIO);
+  finish_waiting(WAIT_COMPLETE, -EIO);
 }
 
 // -----------------------
@@ -2322,18 +2554,18 @@ public:
 
 class C_IO_Dir_Commit_Ops : public Context {
 public:
-  C_IO_Dir_Commit_Ops(CDir *d, int pr,
-		      vector<CDir::dentry_commit_item> &&s, bufferlist &&bl,
-		      vector<string> &&r,
-		      mempool::mds_co::compact_set<mempool::mds_co::string> &&stales) :
-    dir(d), op_prio(pr) {
+  C_IO_Dir_Commit_Ops(CDir* d, int pr, auto&& s, auto&& bl, auto&& r, auto&& stales)
+  :
+    dir(d),
+    op_prio(pr),
+    to_set(std::forward<decltype(s)>(s)),
+    dfts(std::forward<decltype(bl)>(bl)),
+    to_remove(std::forward<decltype(r)>(r)),
+    stale_items(std::forward<decltype(stales)>(stales))
+  {
     metapool = dir->mdcache->mds->get_metadata_pool();
     version = dir->get_version();
     is_new = dir->is_new();
-    to_set.swap(s);
-    dfts.swap(bl);
-    to_remove.swap(r);
-    stale_items.swap(stales);
   }
 
   void finish(int r) override {
@@ -2419,6 +2651,13 @@ void CDir::_omap_commit_ops(int r, int op_prio, int64_t metapool, version_t vers
   auto commit_one = [&](bool header=false) {
     ObjectOperation op;
 
+    /*
+     * Shouldn't submit empty op to Rados, which could cause
+     * the cephfs to become readonly.
+     */
+    ceph_assert(header || !_set.empty() || !_rm.empty());
+
+
     // don't create new dirfrag blindly
     if (!_new)
       op.stat(nullptr, nullptr, nullptr);
@@ -2451,47 +2690,70 @@ void CDir::_omap_commit_ops(int r, int op_prio, int64_t metapool, version_t vers
     _rm.clear();
   };
 
+  int count = 0;
   for (auto &key : stales) {
     unsigned size = key.length() + sizeof(__u32);
-    if (write_size + size > max_write_size)
+    if (write_size > 0 && write_size + size > max_write_size)
       commit_one();
 
     write_size += size;
     _rm.emplace(key);
+
+    if (!(++count % mdcache->mds->heartbeat_reset_grace(2)))
+      mdcache->mds->heartbeat_reset();
   }
 
   for (auto &key : to_remove) {
     unsigned size = key.length() + sizeof(__u32);
-    if (write_size + size > max_write_size)
+    if (write_size > 0 && write_size + size > max_write_size)
       commit_one();
 
     write_size += size;
     _rm.emplace(std::move(key));
+
+    if (!(++count % mdcache->mds->heartbeat_reset_grace(2)))
+      mdcache->mds->heartbeat_reset();
   }
 
-  bufferlist bl;
+  // the last omap commit includes the omap header, so account for
+  // that size early on so that when we reach `commit_one(true)`,
+  // there is enough space for the header.
+  write_size += sizeof(fnode_t);
   using ceph::encode;
   for (auto &item : to_set) {
+    bufferlist bl;
     encode(item.first, bl);
     if (item.is_remote) {
       // remote link
       CDentry::encode_remote(item.ino, item.d_type, item.alternate_name, bl);
+    } else if (item.is_referent_remote) {
+      // marker, name, inode, [symlink string]
+      bl.append('r');         // inode
+
+      ENCODE_START(2, 1, bl);
+      encode(item.alternate_name, bl);
+      _encode_primary_inode_base(item, dfts, bl);
+      ENCODE_FINISH(bl);
     } else {
       // marker, name, inode, [symlink string]
       bl.append('i');         // inode
 
       ENCODE_START(2, 1, bl);
+      // WARNING: always put new fields at the end of bl
       encode(item.alternate_name, bl);
       _encode_primary_inode_base(item, dfts, bl);
       ENCODE_FINISH(bl);
     }
 
     unsigned size = item.key.length() + bl.length() + 2 * sizeof(__u32);
-    if (write_size + size > max_write_size)
+    if (write_size > 0 && write_size + size > max_write_size)
       commit_one();
 
     write_size += size;
-    _set[std::move(item.key)].swap(bl);
+    _set[std::move(item.key)] = std::move(bl);
+
+    if (!(++count % mdcache->mds->heartbeat_reset_grace()))
+      mdcache->mds->heartbeat_reset();
   }
 
   commit_one(true);
@@ -2520,21 +2782,21 @@ void CDir::_omap_commit(int op_prio)
     // fnode.snap_purged_thru = realm->get_last_destroyed();
   }
 
-  size_t count = 0;
+  size_t items_count = 0;
   if (state_test(CDir::STATE_FRAGMENTING) && is_new()) {
-    count = get_num_head_items() + get_num_snap_items();
+    items_count = get_num_head_items() + get_num_snap_items();
   } else {
     for (elist<CDentry*>::iterator it = dirty_dentries.begin(); !it.end(); ++it)
-      ++count;
+      ++items_count;
   }
 
   vector<string> to_remove;
   // reverve enough memories, which maybe larger than the actually needed
-  to_remove.reserve(count);
+  to_remove.reserve(items_count);
 
   vector<dentry_commit_item> to_set;
   // reverve enough memories, which maybe larger than the actually needed
-  to_set.reserve(count);
+  to_set.reserve(items_count);
 
   // for dir fragtrees
   bufferlist dfts(CEPH_PAGE_SIZE);
@@ -2543,8 +2805,11 @@ void CDir::_omap_commit(int op_prio)
     string key;
     dn->key().encode(key);
 
-    if (dn->last != CEPH_NOSNAP &&
-	snaps && try_trim_snap_dentry(dn, *snaps)) {
+    if (!dn->corrupt_first_loaded) {
+      dn->check_corruption(false);
+    }
+
+    if (snaps && try_trim_snap_dentry(dn, *snaps)) {
       dout(10) << " rm " << key << dendl;
       to_remove.emplace_back(std::move(key));
       return;
@@ -2570,6 +2835,7 @@ void CDir::_omap_commit(int op_prio)
     }
   };
 
+  int count = 0;
   if (state_test(CDir::STATE_FRAGMENTING) && is_new()) {
     ceph_assert(committed_version == 0);
     for (auto p = items.begin(); p != items.end(); ) {
@@ -2578,18 +2844,24 @@ void CDir::_omap_commit(int op_prio)
       if (dn->get_linkage()->is_null())
 	continue;
       write_one(dn);
+
+      if (!(++count % mdcache->mds->heartbeat_reset_grace()))
+        mdcache->mds->heartbeat_reset();
     }
   } else {
     for (auto p = dirty_dentries.begin(); !p.end(); ) {
       CDentry *dn = *p;
       ++p;
       write_one(dn);
+
+      if (!(++count % mdcache->mds->heartbeat_reset_grace()))
+        mdcache->mds->heartbeat_reset();
     }
   }
 
   auto c = new C_IO_Dir_Commit_Ops(this, op_prio, std::move(to_set), std::move(dfts),
                                    std::move(to_remove), std::move(stale_items));
-  stale_items.clear();
+  stale_items.clear(); /* in CDir */
   mdcache->mds->finisher->queue(c);
 }
 
@@ -2609,6 +2881,27 @@ void CDir::_parse_dentry(CDentry *dn, dentry_commit_item &item,
     item.ino = linkage.get_remote_ino();
     item.d_type = linkage.get_remote_d_type();
     dout(14) << " dn '" << dn->get_name() << "' remote ino " << item.ino << dendl;
+  } else if (linkage.is_referent_remote()) {
+    // referent link
+    item.is_referent_remote = true;
+    item.ino = linkage.get_remote_ino();
+    item.d_type = linkage.get_remote_d_type();
+
+    CInode *in = linkage.get_referent_inode();
+    ceph_assert(in);
+
+    dout(14) << __func__ << " dn '" << dn->get_name() << "' referent inode " << *in << " remote ino " << item.ino << dendl;
+
+    item.features = mdcache->mds->mdsmap->get_up_features();
+    item.inode = in->inode;
+    if (in->inode->is_symlink())
+      item.symlink = in->symlink;
+    using ceph::encode;
+    encode(in->dirfragtree, bl);
+    item.xattrs = in->xattrs;
+    item.old_inodes = in->old_inodes;
+    item.oldest_snap = in->oldest_snap;
+    item.damage_flags = in->damage_flags;
   } else if (linkage.is_primary()) {
     // primary link
     CInode *in = linkage.get_inode();
@@ -2699,7 +2992,7 @@ void CDir::_committed(int r, version_t v)
 {
   if (r < 0) {
     // the directory could be partly purged during MDS failover
-    if (r == -CEPHFS_ENOENT && committed_version == 0 &&
+    if (r == -ENOENT && committed_version == 0 &&
 	!inode->is_base() && get_parent_dir()->inode->is_stray()) {
       r = 0;
       if (inode->snaprealm)
@@ -2735,11 +3028,30 @@ void CDir::_committed(int r, version_t v)
   if (committed_version == get_version()) 
     mark_clean();
 
+  int count = 0;
+
   // dentries clean?
   for (auto p = dirty_dentries.begin(); !p.end(); ) {
     CDentry *dn = *p;
     ++p;
     
+    // referent inode
+    if (dn->linkage.is_referent_remote()) {
+      CInode *in = dn->linkage.get_referent_inode();
+      ceph_assert(in);
+      ceph_assert(in->is_auth());
+
+      if (committed_version >= in->get_version()) {
+	if (in->is_dirty()) {
+	  dout(15) << __func__ << " referent inode - dir " << committed_version << " >= inode " << in->get_version() << " now clean " << *in << dendl;
+	  in->mark_clean();
+	}
+      } else {
+	dout(15) << __func__ << " referent inode - dir " << committed_version << " < inode " << in->get_version() << " still dirty " << *in << dendl;
+	ceph_assert(in->is_dirty() || in->last < CEPH_NOSNAP);  // special case for cow snap items (not predirtied)
+      }
+    }
+
     // inode?
     if (dn->linkage.is_primary()) {
       CInode *in = dn->linkage.get_inode();
@@ -2772,15 +3084,16 @@ void CDir::_committed(int r, version_t v)
       dout(15) << " dir " << committed_version << " < dn " << dn->get_version() << " still dirty " << *dn << dendl;
       ceph_assert(dn->is_dirty());
     }
+
+    if (!(++count % mdcache->mds->heartbeat_reset_grace()))
+      mdcache->mds->heartbeat_reset();
   }
 
   // finishers?
   bool were_waiters = !waiting_for_commit.empty();
-  
+
   auto it = waiting_for_commit.begin();
   while (it != waiting_for_commit.end()) {
-    auto _it = it;
-    ++_it;
     if (it->first > committed_version) {
       dout(10) << " there are waiters for " << it->first << ", committing again" << dendl;
       _commit(it->first, -1);
@@ -2790,9 +3103,11 @@ void CDir::_committed(int r, version_t v)
     for (const auto &waiter : it->second)
       t.push_back(waiter);
     mdcache->mds->queue_waiters(t);
-    waiting_for_commit.erase(it);
-    it = _it;
-  } 
+    it = waiting_for_commit.erase(it);
+
+    if (!(++count % mdcache->mds->heartbeat_reset_grace()))
+      mdcache->mds->heartbeat_reset();
+  }
 
   // try drop dentries in this dirfrag if it's about to be purged
   if (!inode->is_base() && get_parent_dir()->inode->is_stray() &&
@@ -3175,7 +3490,7 @@ void CDir::verify_fragstat()
       else
 	c.nfiles++;
     }
-    if (dn->is_remote()) {
+    if (dn->is_remote() || dn->is_referent_remote()) {
       if (dn->get_remote_d_type() == DT_DIR)
 	c.nsubdirs++;
       else
@@ -3414,14 +3729,23 @@ bool CDir::can_auth_pin(int *err_ret) const
 {
   int err;
   if (!is_auth()) {
+    dout(20) << __func__ << ": error - no auth" << dendl;
     err = ERR_NOT_AUTH;
   } else if (is_freezing_dir() || is_frozen_dir()) {
+    dout(20) << __func__ << ": error - fragmenting dir ("
+	     << (is_freezing_dir() ? "freezing" : "frozen")
+	     << ")" << dendl;
     err = ERR_FRAGMENTING_DIR;
   } else {
     auto p = is_freezing_or_frozen_tree();
-    if (p.first || p.second) {
+    if (p.first) {
+      dout(20) << __func__ << ": error - exporting tree" << dendl;
+      err = ERR_EXPORTING_TREE;
+    } else if (p.second) {
+      dout(20) << __func__ << ": error - exporting tree" << dendl;
       err = ERR_EXPORTING_TREE;
     } else {
+      dout(20) << __func__ << ": auth!" << dendl;
       err = 0;
     }
   }
@@ -3716,6 +4040,8 @@ bool CDir::scrub_local()
   if (!good && scrub_infop->header->get_repair()) {
     mdcache->repair_dirfrag_stats(this);
     scrub_infop->header->set_repaired();
+    good = true;
+    mdcache->mds->damage_table.remove_dentry_damage_entry(this);
   }
   return good;
 }
@@ -3730,7 +4056,10 @@ std::string CDir::get_path() const
 bool CDir::should_split_fast() const
 {
   // Max size a fragment can be before trigger fast splitting
-  int fast_limit = g_conf()->mds_bal_split_size * g_conf()->mds_bal_fragment_fast_factor;
+  auto&& balancer = mdcache->mds->balancer;
+  auto split_size = balancer->get_bal_split_size();
+  auto fragment_fast_factor = balancer->get_bal_fragment_fast_factor();
+  int64_t fast_limit = split_size * fragment_fast_factor;
 
   // Fast path: the sum of accounted size and null dentries does not
   // exceed threshold: we definitely are not over it.
@@ -3750,10 +4079,13 @@ bool CDir::should_split_fast() const
     const CDentry *dn = p.second;
     if (!dn->get_projected_linkage()->is_null()) {
       effective_size++;
+
+      if (effective_size > fast_limit) [[unlikely]]
+	return true;
     }
   }
 
-  return effective_size > fast_limit;
+  return false;
 }
 
 bool CDir::should_merge() const
@@ -3767,7 +4099,9 @@ bool CDir::should_merge() const
       return false;
   }
 
-  return (int)get_frag_size() < g_conf()->mds_bal_merge_size;
+  uint64_t merge_size = mdcache->mds->balancer->get_bal_merge_size();
+  uint64_t items = get_frag_size() + get_num_snap_items();
+  return items < merge_size;
 }
 
 MEMPOOL_DEFINE_OBJECT_FACTORY(CDir, co_dir, mds_co);

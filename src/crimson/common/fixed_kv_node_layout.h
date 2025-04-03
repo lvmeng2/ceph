@@ -9,6 +9,7 @@
 #include <boost/iterator/counting_iterator.hpp>
 
 #include "include/byteorder.h"
+#include "include/crc32c.h"
 
 #include "crimson/common/layout.h"
 
@@ -52,10 +53,23 @@ template <
 class FixedKVNodeLayout {
   char *buf = nullptr;
 
-  using L = absl::container_internal::Layout<ceph_le32, MetaInt, KINT, VINT>;
-  static constexpr L layout{1, 1, CAPACITY, CAPACITY};
+  using L = absl::container_internal::Layout<
+    ceph_le32, ceph_le32, MetaInt, KINT, VINT>;
+  static constexpr L layout{1, 1, 1, CAPACITY, CAPACITY};
 
 public:
+  static constexpr bool check_capacity(size_t node_size) {
+    auto kv_size = sizeof(KINT) + sizeof(VINT);
+    // layout_size should be consistent with the definition of layout
+    auto layout_size =
+	sizeof(ceph_le32)     // checksum
+	+ sizeof(ceph_le32)   // size
+	+ sizeof(MetaInt)     // meta
+	+ kv_size * CAPACITY;  // keys and values
+    return layout_size <= node_size &&
+	(layout_size + kv_size) > node_size;
+  }
+
   template <bool is_const>
   struct iter_t {
     friend class FixedKVNodeLayout;
@@ -71,13 +85,12 @@ public:
 
     iter_t(const iter_t &) noexcept = default;
     iter_t(iter_t &&) noexcept = default;
+    template<bool is_const_ = is_const>
+    iter_t(const iter_t<false>& it, std::enable_if_t<is_const_, int> = 0)
+      : iter_t{it.node, it.offset}
+    {}
     iter_t &operator=(const iter_t &) = default;
     iter_t &operator=(iter_t &&) = default;
-
-    operator iter_t<!is_const>() const {
-      static_assert(!is_const);
-      return iter_t<!is_const>(node, offset);
-    }
 
     // Work nicely with for loops without requiring a nested type.
     using reference = iter_t&;
@@ -124,15 +137,22 @@ public:
 	offset - off);
     }
 
-    bool operator==(const iter_t &rhs) const {
-      assert(node == rhs.node);
-      return rhs.offset == offset;
+    friend bool operator==(const iter_t &lhs, const iter_t &rhs) {
+      assert(lhs.node == rhs.node);
+      return lhs.offset == rhs.offset;
     }
 
-    bool operator!=(const iter_t &rhs) const {
-      return !(*this == rhs);
+    friend bool operator!=(const iter_t &lhs, const iter_t &rhs) {
+      return !(lhs == rhs);
     }
 
+    friend bool operator==(const iter_t<is_const> &lhs, const iter_t<!is_const> &rhs) {
+      assert(lhs.node == rhs.node);
+      return lhs.offset == rhs.offset;
+    }
+    friend bool operator!=(const iter_t<is_const> &lhs, const iter_t<!is_const> &rhs) {
+      return !(lhs == rhs);
+    }
     K get_key() const {
       return K(node->get_key_ptr()[offset]);
     }
@@ -340,10 +360,15 @@ public:
   }
 
 
-  FixedKVNodeLayout(char *buf) :
-    buf(buf) {}
+  FixedKVNodeLayout() : buf(nullptr) {}
 
   virtual ~FixedKVNodeLayout() = default;
+
+  void set_layout_buf(char *_buf) {
+    assert(buf == nullptr);
+    assert(_buf != nullptr);
+    buf = _buf;
+  }
 
   const_iterator begin() const {
     return const_iterator(
@@ -425,7 +450,7 @@ public:
   }
 
   uint16_t get_size() const {
-    return *layout.template Pointer<0>(buf);
+    return *layout.template Pointer<1>(buf);
   }
 
   /**
@@ -434,7 +459,19 @@ public:
    * Set size representation to match size
    */
   void set_size(uint16_t size) {
-    *layout.template Pointer<0>(buf) = size;
+    *layout.template Pointer<1>(buf) = size;
+  }
+
+  uint32_t get_phy_checksum() const {
+    return *layout.template Pointer<0>(buf);
+  }
+
+  void set_phy_checksum(uint32_t checksum) {
+    *layout.template Pointer<0>(buf) = checksum;
+  }
+
+  uint32_t calc_phy_checksum() const {
+    return calc_phy_checksum_iteratively<4>(1);
   }
 
   /**
@@ -445,11 +482,11 @@ public:
    * in delta_t
    */
   Meta get_meta() const {
-    MetaInt &metaint = *layout.template Pointer<1>(buf);
+    MetaInt &metaint = *layout.template Pointer<2>(buf);
     return Meta(metaint);
   }
   void set_meta(const Meta &meta) {
-    *layout.template Pointer<1>(buf) = MetaInt(meta);
+    *layout.template Pointer<2>(buf) = MetaInt(meta);
   }
 
   constexpr static size_t get_capacity() {
@@ -646,10 +683,23 @@ private:
    * Get pointer to start of key array
    */
   KINT *get_key_ptr() {
-    return layout.template Pointer<2>(buf);
+    return layout.template Pointer<3>(buf);
   }
   const KINT *get_key_ptr() const {
-    return layout.template Pointer<2>(buf);
+    return layout.template Pointer<3>(buf);
+  }
+
+  template <size_t N>
+  uint32_t calc_phy_checksum_iteratively(uint32_t crc) const {
+    if constexpr (N == 0) {
+      return crc;
+    } else {
+      uint32_t r = ceph_crc32c(
+	crc,
+	(unsigned char const *)layout.template Pointer<N>(buf),
+	layout.template Size<N>());
+      return calc_phy_checksum_iteratively<N-1>(r);
+    }
   }
 
   /**
@@ -658,10 +708,10 @@ private:
    * Get pointer to start of val array
    */
   VINT *get_val_ptr() {
-    return layout.template Pointer<3>(buf);
+    return layout.template Pointer<4>(buf);
   }
   const VINT *get_val_ptr() const {
-    return layout.template Pointer<3>(buf);
+    return layout.template Pointer<4>(buf);
   }
 
   /**

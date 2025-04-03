@@ -15,13 +15,15 @@
  *
  */
 
-
+#include "PGBackend.h"
+#include "common/debug.h"
 #include "common/errno.h"
 #include "common/scrub_types.h"
+#include "include/random.h" // for ceph::util::generate_random_number()
 #include "ReplicatedBackend.h"
 #include "osd/scrubber/ScrubStore.h"
 #include "ECBackend.h"
-#include "PGBackend.h"
+#include "ECSwitch.h"
 #include "OSD.h"
 #include "erasure-code/ErasureCodePlugin.h"
 #include "OSDMap.h"
@@ -135,7 +137,7 @@ void PGBackend::handle_recovery_delete(OpRequestRef op)
 {
   auto m = op->get_req<MOSDPGRecoveryDelete>();
   ceph_assert(m->get_type() == MSG_OSD_PG_RECOVERY_DELETE);
-  dout(20) << __func__ << " " << op << dendl;
+  dout(20) << __func__ << " " << *op->get_req() << dendl;
 
   op->mark_started();
 
@@ -154,11 +156,9 @@ void PGBackend::handle_recovery_delete(OpRequestRef op)
   ConnectionRef conn = m->get_connection();
 
   gather.set_finisher(new LambdaContext(
-    [=](int r) {
+    [=, this](int r) {
       if (r != -EAGAIN) {
 	get_parent()->send_message_osd_cluster(reply, conn.get());
-      } else {
-	reply->put();
       }
     }));
   gather.activate();
@@ -168,7 +168,7 @@ void PGBackend::handle_recovery_delete_reply(OpRequestRef op)
 {
   auto m = op->get_req<MOSDPGRecoveryDeleteReply>();
   ceph_assert(m->get_type() == MSG_OSD_PG_RECOVERY_DELETE_REPLY);
-  dout(20) << __func__ << " " << op << dendl;
+  dout(20) << __func__ << " " << *op->get_req() << dendl;
 
   for (const auto &p : m->objects) {
     ObjectRecoveryInfo recovery_info;
@@ -210,7 +210,9 @@ void PGBackend::rollback(
       PGBackend *pg) : hoid(hoid), pg(pg) {}
     void append(uint64_t old_size) override {
       ObjectStore::Transaction temp;
-      pg->rollback_append(hoid, old_size, &temp);
+      int s = static_cast<int>(pg->get_parent()->whoami_shard().shard);
+      const uint64_t shard_size = pg->object_size_to_shard_size(old_size, s);
+      pg->rollback_append(hoid, shard_size, &temp);
       temp.append(t);
       temp.swap(t);
     }
@@ -502,13 +504,13 @@ void PGBackend::rollback_setattrs(
 
 void PGBackend::rollback_append(
   const hobject_t &hoid,
-  uint64_t old_size,
+  uint64_t old_shard_size,
   ObjectStore::Transaction *t) {
   ceph_assert(!hoid.is_temp());
   t->truncate(
     coll,
     ghobject_t(hoid, ghobject_t::NO_GEN, get_parent()->whoami_shard().shard),
-    old_size);
+    old_shard_size);
 }
 
 void PGBackend::rollback_stash(
@@ -593,7 +595,7 @@ PGBackend *PGBackend::build_pg_backend(
       &ec_impl,
       &ss);
     ceph_assert(ec_impl);
-    return new ECBackend(
+    return new ECSwitch(
       l,
       coll,
       ch,
@@ -617,42 +619,61 @@ int PGBackend::be_scan_list(
   ceph_assert(pos.pos < pos.ls.size());
   hobject_t& poid = pos.ls[pos.pos];
 
-  struct stat st;
-  int r = store->stat(
-    ch,
-    ghobject_t(
-      poid, ghobject_t::NO_GEN, get_parent()->whoami_shard().shard),
-    &st,
-    true);
-  if (r == 0) {
-    ScrubMap::object &o = map.objects[poid];
-    o.size = st.st_size;
-    ceph_assert(!o.negative);
-    store->getattrs(
+  int r = 0;
+  ScrubMap::object &o = map.objects[poid];
+  if (!pos.metadata_done) {
+    struct stat st;
+    r = store->stat(
       ch,
       ghobject_t(
 	poid, ghobject_t::NO_GEN, get_parent()->whoami_shard().shard),
-      o.attrs);
+      &st,
+      true);
 
-    if (pos.deep) {
-      r = be_deep_scrub(poid, map, pos, o);
+    if (r == 0) {
+      o.size = st.st_size;
+      ceph_assert(!o.negative);
+      r = store->getattrs(
+	ch,
+	ghobject_t(
+	  poid, ghobject_t::NO_GEN, get_parent()->whoami_shard().shard),
+	o.attrs);
     }
+
+    if (r == -ENOENT) {
+      dout(25) << __func__ << "  " << poid << " got " << r
+	       << ", removing from map" << dendl;
+      map.objects.erase(poid);
+    } else if (r == -EIO) {
+      dout(25) << __func__ << "  " << poid << " got " << r
+	       << ", stat_error" << dendl;
+      o.stat_error = true;
+    } else if (r != 0) {
+      derr << __func__ << " got: " << cpp_strerror(r) << dendl;
+      ceph_abort();
+    }
+
+    if (r != 0) {
+      dout(25) << __func__ << "  " << poid << " got " << r
+	       << ", skipping" << dendl;
+      pos.next_object();
+      return 0;
+    }
+
     dout(25) << __func__ << "  " << poid << dendl;
-  } else if (r == -ENOENT) {
-    dout(25) << __func__ << "  " << poid << " got " << r
-	     << ", skipping" << dendl;
-  } else if (r == -EIO) {
-    dout(25) << __func__ << "  " << poid << " got " << r
-	     << ", stat_error" << dendl;
-    ScrubMap::object &o = map.objects[poid];
-    o.stat_error = true;
-  } else {
-    derr << __func__ << " got: " << cpp_strerror(r) << dendl;
-    ceph_abort();
+    pos.metadata_done = true;
   }
-  if (r == -EINPROGRESS) {
-    return -EINPROGRESS;
+
+  if (pos.deep) {
+    r = be_deep_scrub(poid, map, pos, o);
+    if (r == -EINPROGRESS) {
+      return -EINPROGRESS;
+    } else if (r != 0) {
+      derr << __func__ << " be_deep_scrub got: " << cpp_strerror(r) << dendl;
+      ceph_abort();
+    }
   }
+
   pos.next_object();
   return 0;
 }

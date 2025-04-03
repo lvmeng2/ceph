@@ -29,6 +29,14 @@
 
 using namespace std;
 
+std::string gen_random_string(size_t size) {
+  std::string s;
+  for (size_t i = 0; i < size; i++) {
+    s.push_back(rand());
+  }
+  return s;
+}
+
 class KVTest : public ::testing::TestWithParam<const char*> {
 public:
   boost::scoped_ptr<KeyValueDB> db;
@@ -556,10 +564,11 @@ TEST_P(KVTest, RocksDB_estimate_size) {
   for(int test = 0; test < 20; test++)
   {
     KeyValueDB::Transaction t = db->get_transaction();
-    bufferlist v1;
-    v1.append(string(1000, '1'));
-    for (int i = 0; i < 100; i++)
+    for (int i = 0; i < 100; i++) {
+      bufferlist v1;
+      v1.append(gen_random_string(1000));
       t->set("A", to_string(rand()%100000), v1);
+    }
     db->submit_transaction_sync(t);
     db->compact();
 
@@ -588,10 +597,11 @@ TEST_P(KVTest, RocksDB_estimate_size_column_family) {
   for(int test = 0; test < 20; test++)
   {
     KeyValueDB::Transaction t = db->get_transaction();
-    bufferlist v1;
-    v1.append(string(1000, '1'));
-    for (int i = 0; i < 100; i++)
+    for (int i = 0; i < 100; i++) {
+      bufferlist v1;
+      v1.append(gen_random_string(1000));
       t->set("cf1", to_string(rand()%100000), v1);
+    }
     db->submit_transaction_sync(t);
     db->compact();
 
@@ -1278,7 +1288,7 @@ TEST_F(RocksDBResharding, change_reshard) {
 INSTANTIATE_TEST_SUITE_P(
   KeyValueDB,
   KVTest,
-  ::testing::Values("rocksdb", "memdb"));
+  ::testing::Values("rocksdb"));
 
 INSTANTIATE_TEST_SUITE_P(
   KeyValueDB,
@@ -1296,7 +1306,7 @@ int main(int argc, char **argv) {
   common_init_finish(g_ceph_context);
   g_ceph_context->_conf.set_val(
     "enable_experimental_unrecoverable_data_corrupting_features",
-    "rocksdb, memdb");
+    "rocksdb");
   g_ceph_context->_conf.apply_changes(nullptr);
 
   ::testing::InitGoogleTest(&argc, argv);

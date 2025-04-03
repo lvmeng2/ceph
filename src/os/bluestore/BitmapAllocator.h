@@ -7,12 +7,13 @@
 #include <mutex>
 
 #include "Allocator.h"
+#include "AllocatorBase.h"
 #include "os/bluestore/bluestore_types.h"
 #include "fastbmap_allocator_impl.h"
 #include "include/mempool.h"
 #include "common/debug.h"
 
-class BitmapAllocator : public Allocator,
+class BitmapAllocator : public AllocatorBase,
   public AllocatorLevel02<AllocatorLevel01Loose> {
   CephContext* cct;
 public:
@@ -41,10 +42,14 @@ public:
   }
 
   void dump() override;
-  void dump(std::function<void(uint64_t offset, uint64_t length)> notify) override;
+  void foreach(
+    std::function<void(uint64_t offset, uint64_t length)> notify) override
+  {
+    foreach_internal(notify);
+  }
   double get_fragmentation() override
   {
-    return _get_fragmentation();
+    return get_fragmentation_internal();
   }
 
   void init_add_free(uint64_t offset, uint64_t length) override;

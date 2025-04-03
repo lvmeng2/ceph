@@ -1,4 +1,4 @@
-import { HttpClient } from '@angular/common/http';
+import { HttpClient, HttpParams } from '@angular/common/http';
 import { Injectable } from '@angular/core';
 
 import _ from 'lodash';
@@ -7,16 +7,25 @@ import { map } from 'rxjs/operators';
 
 import { CdDevice } from '../models/devices';
 import { InventoryDeviceType } from '../models/inventory-device-type.model';
+import { DeploymentOptions } from '../models/osd-deployment-options';
 import { OsdSettings } from '../models/osd-settings';
 import { SmartDataResponseV1 } from '../models/smart';
 import { DeviceService } from '../services/device.service';
+import { CdFormGroup } from '../forms/cd-form-group';
+import { PaginateObservable } from './paginate.model';
+import { PaginateParams } from '../classes/paginate-params.class';
+import { Osd } from '../models/osd.model';
 
 @Injectable({
   providedIn: 'root'
 })
 export class OsdService {
   private path = 'api/osd';
+  private uiPath = 'ui-api/osd';
+
   osdDevices: InventoryDeviceType[] = [];
+  selectedFormValues: CdFormGroup;
+  isDeployementModeSimple: boolean = true;
 
   osdRecvSpeedModalPriorities = {
     KNOWN_PRIORITIES: [
@@ -65,17 +74,19 @@ export class OsdService {
 
   constructor(private http: HttpClient, private deviceService: DeviceService) {}
 
-  create(driveGroups: Object[]) {
+  create(driveGroups: Object[], trackingId: string, method = 'drive_groups') {
     const request = {
-      method: 'drive_groups',
+      method: method,
       data: driveGroups,
-      tracking_id: _.join(_.map(driveGroups, 'service_id'), ', ')
+      tracking_id: trackingId
     };
     return this.http.post(this.path, request, { observe: 'response' });
   }
 
-  getList() {
-    return this.http.get(`${this.path}`);
+  getList(params: HttpParams): PaginateObservable<Osd[]> {
+    return new PaginateObservable<Osd[]>(
+      this.http.get<Osd[]>(this.path, new PaginateParams(params, 1, 1))
+    );
   }
 
   getOsdSettings(): Observable<OsdSettings> {
@@ -102,6 +113,10 @@ export class OsdService {
 
   scrub(id: string, deep: boolean) {
     return this.http.post(`${this.path}/${id}/scrub?deep=${deep}`, null);
+  }
+
+  getDeploymentOptions() {
+    return this.http.get<DeploymentOptions>(`${this.uiPath}/deployment_options`);
   }
 
   getFlags() {
@@ -158,6 +173,9 @@ export class OsdService {
 
   safeToDestroy(ids: string) {
     interface SafeToDestroyResponse {
+      active: number[];
+      missing_stats: number[];
+      stored_pgs: number[];
       is_safe_to_destroy: boolean;
       message?: string;
     }

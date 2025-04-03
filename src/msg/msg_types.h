@@ -15,9 +15,16 @@
 #ifndef CEPH_MSG_TYPES_H
 #define CEPH_MSG_TYPES_H
 
+#include <algorithm> // for std::min()
+#include <set>
 #include <sstream>
+#include <string>
 
 #include <netinet/in.h>
+#include "common/fmt_common.h"
+#if FMT_VERSION >= 90000
+#include <fmt/ostream.h>
+#endif
 
 #include "include/ceph_features.h"
 #include "include/types.h"
@@ -93,6 +100,15 @@ public:
     denc(v._num, p);
   }
   void dump(ceph::Formatter *f) const;
+
+  template <typename FormatContext>
+  auto fmt_print_ctx(FormatContext& ctx) const {
+    if (is_new() || _num < 0) {
+      return fmt::format_to(ctx.out(), "{}.?", type_str());
+    } else {
+      return fmt::format_to(ctx.out(), "{}.{}",type_str(), _num);
+    }
+  }
 
   static void generate_test_instances(std::list<entity_name_t*>& o);
 };
@@ -217,7 +233,9 @@ static inline void decode(sockaddr_storage& a,
  * an entity's network address.
  * includes a random value that prevents it from being reused.
  * thus identifies a particular process instance.
- * ipv4 for now.
+ *
+ * This also happens to work to support cidr ranges, in which
+ * case the nonce contains the netmask. It's great!
  */
 struct entity_addr_t {
   typedef enum {
@@ -225,6 +243,7 @@ struct entity_addr_t {
     TYPE_LEGACY = 1,  ///< legacy msgr1 protocol (ceph jewel and older)
     TYPE_MSGR2 = 2,   ///< msgr2 protocol (new in ceph kraken)
     TYPE_ANY = 3,  ///< ambiguous
+    TYPE_CIDR = 4,
   } type_t;
   static const type_t TYPE_DEFAULT = TYPE_MSGR2;
   static std::string_view get_type_name(int t) {
@@ -233,6 +252,7 @@ struct entity_addr_t {
     case TYPE_LEGACY: return "v1";
     case TYPE_MSGR2: return "v2";
     case TYPE_ANY: return "any";
+    case TYPE_CIDR: return "cidr";
     default: return "???";
     }
   };
@@ -265,6 +285,8 @@ struct entity_addr_t {
   bool is_legacy() const { return type == TYPE_LEGACY; }
   bool is_msgr2() const { return type == TYPE_MSGR2; }
   bool is_any() const { return type == TYPE_ANY; }
+  // this isn't a guarantee; some client addrs will match it
+  bool maybe_cidr() const { return get_port() == 0 && nonce != 0; }
 
   __u32 get_nonce() const { return nonce; }
   void set_nonce(__u32 n) { nonce = n; }
@@ -420,6 +442,7 @@ struct entity_addr_t {
   }
 
   std::string ip_only_to_str() const;
+  std::string ip_n_port_to_str() const;
 
   std::string get_legacy_str() const {
     std::ostringstream ss;
@@ -534,6 +557,7 @@ struct entity_addr_t {
   }
 
   void dump(ceph::Formatter *f) const;
+  std::string fmt_print() const; ///< used by the default fmt formatter
 
   static void generate_test_instances(std::list<entity_addr_t*>& o);
 };
@@ -728,6 +752,9 @@ struct entity_addrvec_t {
   }
 };
 WRITE_CLASS_ENCODER_FEATURES(entity_addrvec_t);
+#if FMT_VERSION >= 90000
+template <> struct fmt::formatter<entity_addrvec_t> : fmt::ostream_formatter {};
+#endif
 
 namespace std {
 template<> struct hash<entity_addrvec_t> {

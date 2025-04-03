@@ -9,6 +9,7 @@
 #include <curl/easy.h>
 #include <curl/multi.h>
 
+#include "rgw_asio_thread.h"
 #include "rgw_common.h"
 #include "rgw_http_client.h"
 #include "rgw_http_errors.h"
@@ -61,33 +62,29 @@ struct rgw_http_req_data : public RefCountedObject {
     memset(error_buf, 0, sizeof(error_buf));
   }
 
-  template <typename ExecutionContext, typename CompletionToken>
-  auto async_wait(ExecutionContext& ctx, CompletionToken&& token) {
-    boost::asio::async_completion<CompletionToken, Signature> init(token);
-    auto& handler = init.completion_handler;
-    {
-      std::unique_lock l{lock};
-      completion = Completion::create(ctx.get_executor(), std::move(handler));
-    }
-    return init.result.get();
+  template <typename Executor, typename CompletionToken>
+  auto async_wait(const Executor& ex, std::unique_lock<ceph::mutex>& lock,
+                  CompletionToken&& token) {
+    return boost::asio::async_initiate<CompletionToken, Signature>(
+        [this, &lock] (auto handler, auto ex) {
+          completion = Completion::create(ex, std::move(handler));
+          lock.unlock(); // unlock before suspend
+        }, token, ex);
   }
 
-  int wait(optional_yield y) {
+  int wait(const DoutPrefixProvider* dpp, optional_yield y) {
+    std::unique_lock l{lock};
     if (done) {
       return ret;
     }
     if (y) {
-      auto& context = y.get_io_context();
       auto& yield = y.get_yield_context();
       boost::system::error_code ec;
-      async_wait(context, yield[ec]);
+      async_wait(yield.get_executor(), l, yield[ec]);
       return -ec.value();
     }
-    // work on asio threads should be asynchronous, so warn when they block
-    if (is_asio_thread) {
-      dout(20) << "WARNING: blocking http request" << dendl;
-    }
-    std::unique_lock l{lock};
+    maybe_warn_about_blocking(dpp);
+
     cond.wait(l, [this]{return done==true;});
     return ret;
   }
@@ -306,6 +303,7 @@ RGWHTTPClient::RGWHTTPClient(CephContext *cct,
       verify_ssl(cct->_conf->rgw_verify_ssl),
       cct(cct),
       method(_method),
+      url_orig(_url),
       url(_url) {
   init();
 }
@@ -535,9 +533,9 @@ static bool is_upload_request(const string& method)
 /*
  * process a single simple one off request
  */
-int RGWHTTPClient::process(optional_yield y)
+int RGWHTTPClient::process(const DoutPrefixProvider* dpp, optional_yield y)
 {
-  return RGWHTTP::process(this, y);
+  return RGWHTTP::process(dpp, this, y);
 }
 
 string RGWHTTPClient::to_str()
@@ -586,9 +584,12 @@ int RGWHTTPClient::init_request(rgw_http_req_data *_req_data)
   curl_easy_setopt(easy_handle, CURLOPT_ERRORBUFFER, (void *)req_data->error_buf);
   curl_easy_setopt(easy_handle, CURLOPT_LOW_SPEED_TIME, cct->_conf->rgw_curl_low_speed_time);
   curl_easy_setopt(easy_handle, CURLOPT_LOW_SPEED_LIMIT, cct->_conf->rgw_curl_low_speed_limit);
+  curl_easy_setopt(easy_handle, CURLOPT_TCP_KEEPALIVE, cct->_conf->rgw_curl_tcp_keepalive);
   curl_easy_setopt(easy_handle, CURLOPT_READFUNCTION, send_http_data);
   curl_easy_setopt(easy_handle, CURLOPT_READDATA, (void *)req_data);
   curl_easy_setopt(easy_handle, CURLOPT_BUFFERSIZE, cct->_conf->rgw_curl_buffersize);
+  curl_easy_setopt(easy_handle, CURLOPT_PATH_AS_IS, 1L);
+
   if (send_data_hint || is_upload_request(method)) {
     curl_easy_setopt(easy_handle, CURLOPT_UPLOAD, 1L);
   }
@@ -634,6 +635,7 @@ int RGWHTTPClient::init_request(rgw_http_req_data *_req_data)
   }
   curl_easy_setopt(easy_handle, CURLOPT_PRIVATE, (void *)req_data);
   curl_easy_setopt(easy_handle, CURLOPT_TIMEOUT, req_timeout);
+  curl_easy_setopt(easy_handle, CURLOPT_CONNECTTIMEOUT, req_connect_timeout);
 
   return 0;
 }
@@ -646,9 +648,9 @@ bool RGWHTTPClient::is_done()
 /*
  * wait for async request to complete
  */
-int RGWHTTPClient::wait(optional_yield y)
+int RGWHTTPClient::wait(const DoutPrefixProvider* dpp, optional_yield y)
 {
-  return req_data->wait(y);
+  return req_data->wait(dpp, y);
 }
 
 void RGWHTTPClient::cancel()
@@ -721,8 +723,7 @@ int RGWHTTPTransceiver::send_data(void* ptr, size_t len, bool* pause)
 static int clear_signal(int fd)
 {
   // since we're in non-blocking mode, we can try to read a lot more than
-  // one signal from signal_thread() to avoid later wakeups. non-blocking reads
-  // are also required to support the curl_multi_wait bug workaround
+  // one signal from signal_thread() to avoid later wakeups
   std::array<char, 256> buf{};
   int ret = ::read(fd, (void *)buf.data(), buf.size());
   if (ret < 0) {
@@ -730,68 +731,6 @@ static int clear_signal(int fd)
     return ret == -EAGAIN ? 0 : ret; // clear EAGAIN
   }
   return 0;
-}
-
-#if HAVE_CURL_MULTI_WAIT
-
-static std::once_flag detect_flag;
-static bool curl_multi_wait_bug_present = false;
-
-static int detect_curl_multi_wait_bug(CephContext *cct, CURLM *handle,
-                                      int write_fd, int read_fd)
-{
-  int ret = 0;
-
-  // write to write_fd so that read_fd becomes readable
-  uint32_t buf = 0;
-  ret = ::write(write_fd, &buf, sizeof(buf));
-  if (ret < 0) {
-    ret = -errno;
-    ldout(cct, 0) << "ERROR: " << __func__ << "(): write() returned " << ret << dendl;
-    return ret;
-  }
-
-  // pass read_fd in extra_fds for curl_multi_wait()
-  int num_fds;
-  struct curl_waitfd wait_fd;
-
-  wait_fd.fd = read_fd;
-  wait_fd.events = CURL_WAIT_POLLIN;
-  wait_fd.revents = 0;
-
-  ret = curl_multi_wait(handle, &wait_fd, 1, 0, &num_fds);
-  if (ret != CURLM_OK) {
-    ldout(cct, 0) << "ERROR: curl_multi_wait() returned " << ret << dendl;
-    return -EIO;
-  }
-
-  // curl_multi_wait should flag revents when extra_fd is readable. if it
-  // doesn't, the bug is present and we can't rely on revents
-  if (wait_fd.revents == 0) {
-    curl_multi_wait_bug_present = true;
-    ldout(cct, 0) << "WARNING: detected a version of libcurl which contains a "
-        "bug in curl_multi_wait(). enabling a workaround that may degrade "
-        "performance slightly." << dendl;
-  }
-
-  return clear_signal(read_fd);
-}
-
-static bool is_signaled(const curl_waitfd& wait_fd)
-{
-  if (wait_fd.fd < 0) {
-    // no fd to signal
-    return false;
-  }
-
-  if (curl_multi_wait_bug_present) {
-    // we can't rely on revents, so we always return true if a wait_fd is given.
-    // this means we'll be trying a non-blocking read on this fd every time that
-    // curl_multi_wait() wakes up
-    return true;
-  }
-
-  return wait_fd.revents > 0;
 }
 
 static int do_curl_wait(CephContext *cct, CURLM *handle, int signal_fd)
@@ -809,7 +748,7 @@ static int do_curl_wait(CephContext *cct, CURLM *handle, int signal_fd)
     return -EIO;
   }
 
-  if (is_signaled(wait_fd)) {
+  if (wait_fd.revents > 0) {
     ret = clear_signal(signal_fd);
     if (ret < 0) {
       ldout(cct, 0) << "ERROR: " << __func__ << "(): read() returned " << ret << dendl;
@@ -818,62 +757,6 @@ static int do_curl_wait(CephContext *cct, CURLM *handle, int signal_fd)
   }
   return 0;
 }
-
-#else
-
-static int do_curl_wait(CephContext *cct, CURLM *handle, int signal_fd)
-{
-  fd_set fdread;
-  fd_set fdwrite;
-  fd_set fdexcep;
-  int maxfd = -1;
- 
-  FD_ZERO(&fdread);
-  FD_ZERO(&fdwrite);
-  FD_ZERO(&fdexcep);
-
-  /* get file descriptors from the transfers */ 
-  int ret = curl_multi_fdset(handle, &fdread, &fdwrite, &fdexcep, &maxfd);
-  if (ret) {
-    ldout(cct, 0) << "ERROR: curl_multi_fdset returned " << ret << dendl;
-    return -EIO;
-  }
-
-  if (signal_fd > 0) {
-    FD_SET(signal_fd, &fdread);
-    if (signal_fd >= maxfd) {
-      maxfd = signal_fd + 1;
-    }
-  }
-
-  /* forcing a strict timeout, as the returned fdsets might not reference all fds we wait on */
-  uint64_t to = cct->_conf->rgw_curl_wait_timeout_ms;
-#define RGW_CURL_TIMEOUT 1000
-  if (!to)
-    to = RGW_CURL_TIMEOUT;
-  struct timeval timeout;
-  timeout.tv_sec = to / 1000;
-  timeout.tv_usec = to % 1000;
-
-  ret = select(maxfd+1, &fdread, &fdwrite, &fdexcep, &timeout);
-  if (ret < 0) {
-    ret = -errno;
-    ldout(cct, 0) << "ERROR: select returned " << ret << dendl;
-    return ret;
-  }
-
-  if (signal_fd > 0 && FD_ISSET(signal_fd, &fdread)) {
-    ret = clear_signal(signal_fd);
-    if (ret < 0) {
-      ldout(cct, 0) << "ERROR: " << __func__ << "(): read() returned " << ret << dendl;
-      return ret;
-    }
-  }
-
-  return 0;
-}
-
-#endif
 
 void *RGWHTTPManager::ReqsThread::entry()
 {
@@ -1135,7 +1018,10 @@ int RGWHTTPManager::set_request_state(RGWHTTPClient *client, RGWHTTPRequestSetSt
     return 0;
   }
 
+  // mutex already locked
+  // coverity[missing_lock:SUPPRESS]
   req_data->write_paused = suggested_wr_paused;
+  // coverity[missing_lock:SUPPRESS]
   req_data->read_paused = suggested_rd_paused;
 
   int bitmask = CURLPAUSE_CONT;
@@ -1173,14 +1059,6 @@ int RGWHTTPManager::start()
     TEMP_FAILURE_RETRY(::close(thread_pipe[1]));
     return -e;
   }
-
-#ifdef HAVE_CURL_MULTI_WAIT
-  // on first initialization, use this pipe to detect whether we're using a
-  // buggy version of libcurl
-  std::call_once(detect_flag, detect_curl_multi_wait_bug, cct,
-                 static_cast<CURLM*>(multi_handle),
-                 thread_pipe[1], thread_pipe[0]);
-#endif
 
   is_started = true;
   reqs_thread = new ReqsThread(this);
@@ -1270,18 +1148,19 @@ void *RGWHTTPManager::reqs_thread_entry()
           http_status = err.http_ret;
         }
         int id = req_data->id;
-	finish_request(req_data, status, http_status);
         switch (result) {
           case CURLE_OK:
             break;
           case CURLE_OPERATION_TIMEDOUT:
             dout(0) << "WARNING: curl operation timed out, network average transfer speed less than " 
               << cct->_conf->rgw_curl_low_speed_limit << " Bytes per second during " << cct->_conf->rgw_curl_low_speed_time << " seconds." << dendl;
+          // coverity[unterminated_case:SUPPRESS]
           default:
             dout(20) << "ERROR: msg->data.result=" << result << " req_data->id=" << id << " http_status=" << http_status << dendl;
             dout(20) << "ERROR: curl error: " << curl_easy_strerror((CURLcode)result) << " req_data->error_buf=" << req_data->error_buf << dendl;
 	    break;
         }
+	finish_request(req_data, status, http_status);
       }
     }
   }
@@ -1335,7 +1214,7 @@ int RGWHTTP::send(RGWHTTPClient *req) {
   return 0;
 }
 
-int RGWHTTP::process(RGWHTTPClient *req, optional_yield y) {
+int RGWHTTP::process(const DoutPrefixProvider* dpp, RGWHTTPClient *req, optional_yield y) {
   if (!req) {
     return 0;
   }
@@ -1344,6 +1223,6 @@ int RGWHTTP::process(RGWHTTPClient *req, optional_yield y) {
     return r;
   }
 
-  return req->wait(y);
+  return req->wait(dpp, y);
 }
 

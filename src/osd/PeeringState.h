@@ -5,13 +5,16 @@
 
 #include <boost/statechart/custom_reaction.hpp>
 #include <boost/statechart/event.hpp>
-#include <boost/statechart/simple_state.hpp>
 #include <boost/statechart/state.hpp>
 #include <boost/statechart/state_machine.hpp>
 #include <boost/statechart/transition.hpp>
 #include <boost/statechart/event_base.hpp>
 #include <string>
 #include <atomic>
+#include <map>
+#include <optional>
+#include <ostream>
+#include <vector>
 
 #include "include/ceph_assert.h"
 #include "include/common_fwd.h"
@@ -23,8 +26,13 @@
 #include "os/ObjectStore.h"
 #include "OSDMap.h"
 #include "MissingLoc.h"
-#include "osd/osd_perf_counters.h"
-#include "common/ostream_temp.h"
+#include "msg/Message.h"
+#include "msg/MessageRef.h"
+#include "common/ceph_mutex.h"
+#include "common/config_cacher.h"
+#include "common/snap_types.h" // for class SnapContext
+
+class OstreamTemp;
 
 struct PGPool {
   epoch_t cached_epoch;
@@ -57,11 +65,27 @@ struct PGPool {
   }
 };
 
+template <>
+struct fmt::formatter<PGPool> {
+  template <typename ParseContext>
+  constexpr auto parse(ParseContext& ctx) { return ctx.begin(); }
+
+  template <typename FormatContext>
+  auto format(const PGPool& pool, FormatContext& ctx)
+  {
+    return fmt::format_to(ctx.out(),
+                          "{}/{}({})",
+                          pool.id,
+                          pool.name,
+                          pool.info);
+  }
+};
+
 struct PeeringCtx;
 
 // [primary only] content recovery state
 struct BufferedRecoveryMessages {
-#if defined(WITH_SEASTAR)
+#ifdef WITH_SEASTAR
   std::map<int, std::vector<MessageURef>> message_map;
 #else
   std::map<int, std::vector<MessageRef>> message_map;
@@ -262,15 +286,6 @@ public:
       bool need_write_epoch,
       ObjectStore::Transaction &t) = 0;
 
-    /// Notify that info/history changed (generally to update scrub registration)
-    virtual void on_info_history_change() = 0;
-
-    /// Notify PG that Primary/Replica status has changed (to update scrub registration)
-    virtual void on_primary_status_change(bool was_primary, bool now_primary) = 0;
-
-    /// Need to reschedule next scrub. Assuming no change in role
-    virtual void reschedule_scrub() = 0;
-
     /// Notify that a scrub has been requested
     virtual void scrub_requested(scrub_level_t scrub_level, scrub_type_t scrub_type) = 0;
 
@@ -278,7 +293,7 @@ public:
     virtual uint64_t get_snap_trimq_size() const = 0;
 
     /// Send cluster message to osd
-    #if defined(WITH_SEASTAR)
+    #ifdef WITH_SEASTAR
     virtual void send_cluster_message(
       int osd, MessageURef m, epoch_t epoch, bool share_map_update=false) = 0;
     #else
@@ -288,7 +303,7 @@ public:
     /// Send pg_created to mon
     virtual void send_pg_created(pg_t pgid) = 0;
 
-    virtual ceph::signedspan get_mnow() = 0;
+    virtual ceph::signedspan get_mnow() const = 0;
     virtual HeartbeatStampsRef get_hb_stamps(int peer) = 0;
     virtual void schedule_renew_lease(epoch_t plr, ceph::timespan delay) = 0;
     virtual void queue_check_readable(epoch_t lpr, ceph::timespan delay) = 0;
@@ -381,6 +396,7 @@ public:
     virtual void on_role_change() = 0;
     virtual void on_change(ObjectStore::Transaction &t) = 0;
     virtual void on_activate(interval_set<snapid_t> to_trim) = 0;
+    virtual void on_replica_activate() {}
     virtual void on_activate_complete() = 0;
     virtual void on_new_interval() = 0;
     virtual Context *on_clean() = 0;
@@ -404,12 +420,13 @@ public:
     // ==================== Std::map notifications ===================
     virtual void on_active_actmap() = 0;
     virtual void on_active_advmap(const OSDMapRef &osdmap) = 0;
-    virtual epoch_t oldest_stored_osdmap() = 0;
+    virtual epoch_t cluster_osdmap_trim_lower_bound() = 0;
 
     // ============ recovery reservation notifications ==========
     virtual void on_backfill_reserved() = 0;
-    virtual void on_backfill_canceled() = 0;
+    virtual void on_backfill_suspended() = 0;
     virtual void on_recovery_reserved() = 0;
+    virtual void on_recovery_cancelled() = 0;
 
     // ================recovery space accounting ================
     virtual bool try_reserve_recovery_space(
@@ -635,37 +652,37 @@ public:
   /* States */
   // Initial
   // Reset
-  // Start
-  //   Started
-  //     Primary
-  //       WaitActingChange
-  //       Peering
-  //         GetInfo
-  //         GetLog
-  //         GetMissing
-  //         WaitUpThru
-  //         Incomplete
-  //       Active
-  //         Activating
-  //         Clean
-  //         Recovered
-  //         Backfilling
-  //         WaitRemoteBackfillReserved
-  //         WaitLocalBackfillReserved
-  //         NotBackfilling
-  //         NotRecovering
-  //         Recovering
-  //         WaitRemoteRecoveryReserved
-  //         WaitLocalRecoveryReserved
-  //     ReplicaActive
-  //       RepNotRecovering
-  //       RepRecovering
-  //       RepWaitBackfillReserved
-  //       RepWaitRecoveryReserved
-  //     Stray
-  //     ToDelete
-  //       WaitDeleteReserved
-  //       Deleting
+  // Started
+  //   Start
+  //   Primary
+  //     WaitActingChange
+  //     Peering
+  //       GetInfo
+  //       GetLog
+  //       GetMissing
+  //       WaitUpThru
+  //       Incomplete
+  //     Active
+  //       Activating
+  //       Clean
+  //       Recovered
+  //       Backfilling
+  //       WaitRemoteBackfillReserved
+  //       WaitLocalBackfillReserved
+  //       NotBackfilling
+  //       NotRecovering
+  //       Recovering
+  //       WaitRemoteRecoveryReserved
+  //       WaitLocalRecoveryReserved
+  //   ReplicaActive
+  //     RepNotRecovering
+  //     RepRecovering
+  //     RepWaitBackfillReserved
+  //     RepWaitRecoveryReserved
+  //   Stray
+  //   ToDelete
+  //     WaitDeleteReserved
+  //     Deleting
   // Crashed
 
   struct Crashed : boost::statechart::state< Crashed, PeeringMachine >, NamedState {
@@ -681,6 +698,7 @@ public:
     typedef boost::mpl::list <
       boost::statechart::transition< Initialize, Reset >,
       boost::statechart::custom_reaction< NullEvt >,
+      boost::statechart::custom_reaction< PgCreateEvt >,
       boost::statechart::transition< boost::statechart::event_base, Crashed >
       > reactions;
 
@@ -702,6 +720,7 @@ public:
       boost::statechart::custom_reaction< AdvMap >,
       boost::statechart::custom_reaction< ActMap >,
       boost::statechart::custom_reaction< NullEvt >,
+      boost::statechart::custom_reaction< PgCreateEvt >,
       boost::statechart::custom_reaction< IntervalFlush >,
       boost::statechart::transition< boost::statechart::event_base, Crashed >
       > reactions;
@@ -728,6 +747,7 @@ public:
       boost::statechart::custom_reaction< IntervalFlush >,
       // ignored
       boost::statechart::custom_reaction< NullEvt >,
+      boost::statechart::custom_reaction< PgCreateEvt >,
       boost::statechart::custom_reaction<SetForceRecovery>,
       boost::statechart::custom_reaction<UnsetForceRecovery>,
       boost::statechart::custom_reaction<SetForceBackfill>,
@@ -858,7 +878,8 @@ public:
       boost::statechart::custom_reaction< DoRecovery>,
       boost::statechart::custom_reaction< RenewLease>,
       boost::statechart::custom_reaction< MLeaseAck>,
-      boost::statechart::custom_reaction< CheckReadable>
+      boost::statechart::custom_reaction< CheckReadable>,
+      boost::statechart::custom_reaction< PgCreateEvt >
       > reactions;
     boost::statechart::result react(const QueryState& q);
     boost::statechart::result react(const QueryUnfound& q);
@@ -897,6 +918,7 @@ public:
       return discard_event();
     }
     boost::statechart::result react(const CheckReadable&);
+    boost::statechart::result react(const PgCreateEvt&);
     void all_activated_and_committed();
   };
 
@@ -948,7 +970,7 @@ public:
     boost::statechart::result react(const RemoteReservationRevoked& evt);
     boost::statechart::result react(const DeferBackfill& evt);
     boost::statechart::result react(const UnfoundBackfill& evt);
-    void cancel_backfill();
+    void suspend_backfill();
     void exit();
   };
 
@@ -1376,6 +1398,10 @@ public:
 
   PGStateHistory state_history;
   CephContext* cct;
+  md_config_cacher_t<int64_t> osd_pg_stat_report_interval_max_seconds{
+    cct->_conf, "osd_pg_stat_report_interval_max_seconds" };
+  md_config_cacher_t<int64_t> osd_pg_stat_report_interval_max_epochs{
+    cct->_conf, "osd_pg_stat_report_interval_max_epochs" };
   spg_t spgid;
   DoutPrefixProvider *dpp;
   PeeringListener *pl;
@@ -1455,8 +1481,24 @@ public:
 
   epoch_t last_peering_reset = 0;   ///< epoch of last peering reset
 
-  /// last_update that has committed; ONLY DEFINED WHEN is_active()
-  eversion_t  last_update_ondisk;
+  /**
+   * pg_committed_to
+   *
+   * Maintained on the primary while pg is active (and not merely peered).
+   *
+   * Forall e <= pg_committed_to, e has been committed on all replicas.
+   *
+   * As a consequence:
+   * - No version e <= pg_committed_to can become divergent
+   * - It is safe for replicas to read any object whose most recent update is
+   *   <= pg_committed_to
+   *
+   * Note that if the PG is only peered, pg_committed_to not be set
+   * and will remain eversion_t{} as we cannot guarantee that last_update
+   * at activation will not later become divergent.
+   */
+  eversion_t  pg_committed_to;
+
   eversion_t  last_complete_ondisk; ///< last_complete that has committed.
   eversion_t  last_update_applied;  ///< last_update readable
   /// last version to which rollback_info trimming has been applied
@@ -1475,6 +1517,18 @@ public:
   std::map<pg_shard_t, pg_missing_t> peer_missing; ///< peer missing sets
   std::set<pg_shard_t> peer_log_requested; ///< logs i've requested (and start stamps)
   std::set<pg_shard_t> peer_missing_requested; ///< missing sets requested
+
+  /// not constexpr because classic/crimson might differ
+  const pg_feature_vec_t local_pg_acting_features;
+  
+  /**
+   * acting_pg_features
+   *
+   * PG specific features common to entire acting set.  Valid only on primary
+   * after activation.
+   */
+  pg_feature_vec_t pg_acting_features;
+
 
   /// features supported by all peers
   uint64_t peer_features = CEPH_FEATURES_SUPPORTED_DEFAULT;
@@ -1526,8 +1580,7 @@ public:
 
   void update_heartbeat_peers();
   void query_unfound(Formatter *f, std::string state);
-  bool proc_replica_info(
-    pg_shard_t from, const pg_info_t &oinfo, epoch_t send_epoch);
+  bool proc_replica_notify(const pg_shard_t &from, const pg_notify_t &notify);
   void remove_down_peer_info(const OSDMapRef &osdmap);
   void check_recovery_sources(const OSDMapRef& map);
   void set_last_peering_reset();
@@ -1560,6 +1613,47 @@ public:
   /// get priority for pg deletion
   unsigned get_delete_priority();
 
+public:
+  /**
+   * recovery_msg_priority_t
+   *
+   * Defines priority values for use with recovery messages.  The values are
+   * chosen to be reasonable for wpq during an upgrade scenarios, but are
+   * actually translated into a class in PGRecoveryMsg::get_scheduler_class()
+   */
+  enum recovery_msg_priority_t : int {
+    FORCED = 20,
+    UNDERSIZED = 15,
+    DEGRADED = 10,
+    BEST_EFFORT = 5
+  };
+
+  /// get message priority for recovery messages
+  int get_recovery_op_priority() const {
+    if (cct->_conf->osd_op_queue == "mclock_scheduler") {
+      /* For mclock, we use special priority values which will be
+       * translated into op classes within PGRecoveryMsg::get_scheduler_class
+       */
+      if (is_forced_recovery_or_backfill()) {
+	return recovery_msg_priority_t::FORCED;
+      } else if (is_undersized()) {
+	return recovery_msg_priority_t::UNDERSIZED;
+      } else if (is_degraded()) {
+	return recovery_msg_priority_t::DEGRADED;
+      } else {
+	return recovery_msg_priority_t::BEST_EFFORT;
+      }
+    } else {
+      /* For WeightedPriorityQueue, we use pool or osd config settings to
+       * statically set the priority for recovery messages.  This special
+       * handling should probably be removed after Reef */
+      int64_t pri = 0;
+      pool.info.opts.get(pool_opts_t::RECOVERY_OP_PRIORITY, &pri);
+      return  pri > 0 ? pri : cct->_conf->osd_recovery_op_priority;
+    }
+  }
+
+private:
   bool check_prior_readable_down_osds(const OSDMapRef& map);
 
   bool adjust_need_up_thru(const OSDMapRef osdmap);
@@ -1668,24 +1762,7 @@ public:
   void proc_replica_log(pg_info_t &oinfo, const pg_log_t &olog,
 			pg_missing_t&& omissing, pg_shard_t from);
 
-  void calc_min_last_complete_ondisk() {
-    eversion_t min = last_complete_ondisk;
-    ceph_assert(!acting_recovery_backfill.empty());
-    for (std::set<pg_shard_t>::iterator i = acting_recovery_backfill.begin();
-	 i != acting_recovery_backfill.end();
-	 ++i) {
-      if (*i == get_primary()) continue;
-      if (peer_last_complete_ondisk.count(*i) == 0)
-	return;   // we don't have complete info
-      eversion_t a = peer_last_complete_ondisk[*i];
-      if (a < min)
-	min = a;
-    }
-    if (min == min_last_complete_ondisk)
-      return;
-    min_last_complete_ondisk = min;
-    return;
-  }
+  void calc_min_last_complete_ondisk();
 
   void fulfill_info(
     pg_shard_t from, const pg_query_t &query,
@@ -1711,6 +1788,7 @@ public:
     spg_t spgid,
     const PGPool &pool,
     OSDMapRef curmap,
+    pg_feature_vec_t supported_pg_acting_features,
     DoutPrefixProvider *dpp,
     PeeringListener *pl);
 
@@ -1860,18 +1938,7 @@ public:
     const mempool::osd_pglog::list<pg_log_entry_t> &entries,
     ObjectStore::Transaction &t,
     std::optional<eversion_t> trim_to,
-    std::optional<eversion_t> roll_forward_to);
-
-  void append_log_with_trim_to_updated(
-    std::vector<pg_log_entry_t>&& log_entries,
-    eversion_t roll_forward_to,
-    ObjectStore::Transaction &t,
-    bool transaction_applied,
-    bool async) {
-    update_trim_to();
-    append_log(std::move(log_entries), pg_trim_to, roll_forward_to,
-	min_last_complete_ondisk, t, transaction_applied, async);
-  }
+    std::optional<eversion_t> pg_committed_to);
 
   /**
    * Updates local log to reflect new write from primary.
@@ -1880,10 +1947,20 @@ public:
     std::vector<pg_log_entry_t>&& logv,
     eversion_t trim_to,
     eversion_t roll_forward_to,
-    eversion_t min_last_complete_ondisk,
+    eversion_t pg_committed_to,
     ObjectStore::Transaction &t,
     bool transaction_applied,
     bool async);
+
+  /**
+   * update_pct
+   *
+   * Updates pg_committed_to.  Generally invoked on replica on
+   * receipt of MODPGPCT from primary.
+   */
+  void update_pct(eversion_t pct) {
+    pg_committed_to = pct;
+  }
 
   /**
    * retrieve the min last_backfill among backfill targets
@@ -1898,7 +1975,7 @@ public:
     const mempool::osd_pglog::list<pg_log_entry_t> &entries,
     ObjectStore::Transaction &t,
     std::optional<eversion_t> trim_to,
-    std::optional<eversion_t> roll_forward_to);
+    std::optional<eversion_t> pg_committed_to);
 
   /// Update missing set to reflect e (TODOSAM: not sure why this is needed)
   void add_local_next_event(const pg_log_entry_t& e) {
@@ -2003,15 +2080,11 @@ public:
   /// Update lcod for fromosd
   void update_peer_last_complete_ondisk(
     pg_shard_t fromosd,
-    eversion_t lcod) {
-    peer_last_complete_ondisk[fromosd] = lcod;
-  }
+    eversion_t lcod);
 
   /// Update lcod
   void update_last_complete_ondisk(
-    eversion_t lcod) {
-    last_complete_ondisk = lcod;
-  }
+    eversion_t lcod);
 
   /// Update state to reflect recovery up to version
   void recovery_committed_to(eversion_t version);
@@ -2136,7 +2209,7 @@ public:
     return last_rollback_info_trimmed_to_applied;
   }
   /// Returns stable reference to internal pool structure
-  const PGPool &get_pool() const {
+  const PGPool &get_pgpool() const {
     return pool;
   }
   /// Returns reference to current osdmap
@@ -2175,7 +2248,7 @@ public:
   }
   static bool has_shard(bool ec, const std::vector<int>& v, pg_shard_t osd) {
     if (ec) {
-      return v.size() > (unsigned)osd.shard && v[osd.shard] == osd.osd;
+      return v.size() > (unsigned)osd.shard && v[static_cast<int>(osd.shard)] == osd.osd;
     } else {
       return std::find(v.begin(), v.end(), osd.osd) != v.end();
     }
@@ -2305,13 +2378,15 @@ public:
     if (peer == pg_whoami) {
       return pg_log.get_missing();
     } else {
-      assert(peer_missing.count(peer));
-      return peer_missing.find(peer)->second;
+      auto it = peer_missing.find(peer);
+      assert(it != peer_missing.end());
+      return it->second;
     }
   }
   const pg_info_t&get_peer_info(pg_shard_t peer) const {
-    assert(peer_info.count(peer));
-    return peer_info.find(peer)->second;
+    auto it = peer_info.find(peer);
+    assert(it != peer_info.end());
+    return it->second;
   }
   bool has_peer_info(pg_shard_t peer) const {
     return peer_info.count(peer);
@@ -2320,14 +2395,7 @@ public:
   bool needs_recovery() const;
   bool needs_backfill() const;
 
-  /**
-   * Returns whether a particular object can be safely read on this replica
-   */
-  bool can_serve_replica_read(const hobject_t &hoid) {
-    ceph_assert(!is_primary());
-    return !pg_log.get_log().has_write_since(
-      hoid, get_min_last_complete_ondisk());
-  }
+  bool can_serve_replica_read(const hobject_t &hoid);
 
   /**
    * Returns whether the current acting set is able to go active
@@ -2382,10 +2450,6 @@ public:
     return missing_loc.get_missing_by_count();
   }
 
-  eversion_t get_min_last_complete_ondisk() const {
-    return min_last_complete_ondisk;
-  }
-
   eversion_t get_pg_trim_to() const {
     return pg_trim_to;
   }
@@ -2394,8 +2458,8 @@ public:
     return last_update_applied;
   }
 
-  eversion_t get_last_update_ondisk() const {
-    return last_update_ondisk;
+  eversion_t get_pg_committed_to() const {
+    return pg_committed_to;
   }
 
   bool debug_has_dirty_state() const {
@@ -2437,6 +2501,8 @@ public:
   /// Get feature vector common to up/acting set
   uint64_t get_min_upacting_features() const { return upacting_features; }
 
+  /// Get pg features common to acting set
+  pg_feature_vec_t get_pg_acting_features() const { return pg_acting_features; }
 
   // Flush control interface
 private:

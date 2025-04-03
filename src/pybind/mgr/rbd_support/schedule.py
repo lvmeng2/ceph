@@ -125,7 +125,8 @@ class LevelSpec:
                     raise ValueError("pool {} does not exist".format(pool_name))
                 if pool_id not in get_rbd_pools(module):
                     raise ValueError("{} is not an RBD pool".format(pool_name))
-                id += str(pool_id)
+                pool_id = str(pool_id)
+                id += pool_id
                 if match.group(2) is not None or match.group(3):
                     id += "/"
                     with module.rados.open_ioctx(pool_name) as ioctx:
@@ -377,18 +378,10 @@ class Schedules:
         self.level_specs: Dict[str, LevelSpec] = {}
         self.schedules: Dict[str, Schedule] = {}
 
-    def __len__(self) -> int:
-        return len(self.schedules)
-
-    def load(self,
-             namespace_validator: Optional[Callable] = None,
-             image_validator: Optional[Callable] = None) -> None:
-
-        schedule_cfg = self.handler.module.get_module_option(
-            self.handler.MODULE_OPTION_NAME, '')
-
         # Previous versions incorrectly stored the global config in
         # the localized module option. Check the config is here and fix it.
+        schedule_cfg = self.handler.module.get_module_option(
+            self.handler.MODULE_OPTION_NAME, '')
         if not schedule_cfg:
             schedule_cfg = self.handler.module.get_localized_module_option(
                 self.handler.MODULE_OPTION_NAME, '')
@@ -398,6 +391,17 @@ class Schedules:
         self.handler.module.set_localized_module_option(
             self.handler.MODULE_OPTION_NAME, None)
 
+    def __len__(self) -> int:
+        return len(self.schedules)
+
+    def load(self,
+             namespace_validator: Optional[Callable] = None,
+             image_validator: Optional[Callable] = None) -> None:
+        self.level_specs = {}
+        self.schedules = {}
+
+        schedule_cfg = self.handler.module.get_module_option(
+            self.handler.MODULE_OPTION_NAME, '')
         if schedule_cfg:
             try:
                 level_spec = LevelSpec.make_global()
@@ -414,6 +418,8 @@ class Schedules:
                 with self.handler.module.rados.open_ioctx2(int(pool_id)) as ioctx:
                     self.load_from_pool(ioctx, namespace_validator,
                                         image_validator)
+            except rados.ConnectionShutdown:
+                raise
             except rados.Error as e:
                 self.handler.log.error(
                     "Failed to load schedules for pool {}: {}".format(
@@ -423,7 +429,6 @@ class Schedules:
                        ioctx: rados.Ioctx,
                        namespace_validator: Optional[Callable],
                        image_validator: Optional[Callable]) -> None:
-        pool_id = ioctx.get_pool_id()
         pool_name = ioctx.get_pool_name()
         stale_keys = []
         start_after = ''
@@ -505,19 +510,21 @@ class Schedules:
 
     def remove(self,
                level_spec: LevelSpec,
-               interval: Optional[str],
-               start_time: Optional[str]) -> None:
+               interval_str: Optional[str],
+               start_time_str: Optional[str]) -> None:
+        # from_string() may raise, so call it before popping the schedule (and
+        # unconditionally to ensure that invalid interval or start time always
+        # leads to an error)
+        interval = Interval.from_string(interval_str) if interval_str else None
+        start_time = StartTime.from_string(start_time_str)
         schedule = self.schedules.pop(level_spec.id, None)
         if schedule:
             if interval is None:
                 schedule = None
             else:
-                try:
-                    schedule.remove(Interval.from_string(interval),
-                                    StartTime.from_string(start_time))
-                finally:
-                    if schedule:
-                        self.schedules[level_spec.id] = schedule
+                schedule.remove(interval, start_time)
+                if schedule:
+                    self.schedules[level_spec.id] = schedule
             if not schedule:
                 del self.level_specs[level_spec.id]
         self.save(level_spec, schedule)
@@ -568,7 +575,7 @@ class Schedules:
             ls = self.level_specs[level_spec_id]
             if ls == parent or ls == level_spec or ls.is_child_of(level_spec):
                 result[level_spec_id] = {
-                    'name' : schedule.name,
-                    'schedule' : schedule.to_list(),
+                    'name': schedule.name,
+                    'schedule': schedule.to_list(),
                 }
         return result

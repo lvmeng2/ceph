@@ -207,7 +207,7 @@ bool ObjectCacherObjectDispatch<I>::read(
   on_dispatched = util::create_async_context_callback(*m_image_ctx,
                                                       on_dispatched);
 
-  // embed the RBD-internal read flags in the genenric RADOS op_flags and
+  // embed the RBD-internal read flags in the generic RADOS op_flags and
   op_flags = ((op_flags & ~ObjectCacherWriteback::READ_FLAGS_MASK) |
               ((read_flags << ObjectCacherWriteback::READ_FLAGS_SHIFT) &
                ObjectCacherWriteback::READ_FLAGS_MASK));
@@ -224,7 +224,7 @@ bool ObjectCacherObjectDispatch<I>::read(
 
   m_image_ctx->image_lock.lock_shared();
   auto rd = m_object_cacher->prepare_read(
-    io_context->read_snap().value_or(CEPH_NOSNAP), bl, op_flags);
+    io_context->get_read_snap(), bl, op_flags);
   m_image_ctx->image_lock.unlock_shared();
 
   uint64_t off = 0;
@@ -324,8 +324,8 @@ bool ObjectCacherObjectDispatch<I>::write(
   }
 
   SnapContext snapc;
-  if (io_context->write_snap_context()) {
-    auto write_snap_context = *io_context->write_snap_context();
+  if (io_context->get_write_snap_context()) {
+    auto write_snap_context = *io_context->get_write_snap_context();
     snapc = SnapContext(write_snap_context.first,
                         {write_snap_context.second.begin(),
                          write_snap_context.second.end()});
@@ -333,7 +333,7 @@ bool ObjectCacherObjectDispatch<I>::write(
 
   m_image_ctx->image_lock.lock_shared();
   ObjectCacher::OSDWrite *wr = m_object_cacher->prepare_write(
-    snapc, data, ceph::real_time::min(), op_flags, *journal_tid);
+    snapc, data, ceph::real_clock::zero(), op_flags, *journal_tid);
   m_image_ctx->image_lock.unlock_shared();
 
   ObjectExtent extent(data_object_name(m_image_ctx, object_no),
@@ -389,17 +389,36 @@ bool ObjectCacherObjectDispatch<I>::compare_and_write(
   // pass-through the compare-and-write request since it's not a supported
   // operation of the ObjectCacher
 
+  ObjectExtents object_extents;
+  object_extents.emplace_back(data_object_name(m_image_ctx, object_no),
+                              object_no, object_off, cmp_data.length(), 0);
+
+  // if compare succeeds, discard the cache state after changes are
+  // committed to disk
+  auto ctx = *on_finish;
+  *on_finish = new LambdaContext(
+    [this, object_extents, ctx](int r) {
+      // ObjectCacher doesn't provide a way to reliably invalidate
+      // extents: in case of a racing read (if the bh is in RX state),
+      // release_set() just returns while discard_set() populates the
+      // extent with zeroes.  Neither is OK but the latter is better
+      // because it is at least deterministic...
+      if (r == 0) {
+        m_cache_lock.lock();
+        m_object_cacher->discard_set(m_object_set, object_extents);
+        m_cache_lock.unlock();
+      }
+
+      ctx->complete(r);
+    });
+
   // ensure we aren't holding the cache lock post-flush
   on_dispatched = util::create_async_context_callback(*m_image_ctx,
                                                       on_dispatched);
 
-  // flush any pending writes from the cache
+  // flush any pending writes from the cache before compare
   ZTracer::Trace trace(parent_trace);
   *dispatch_result = io::DISPATCH_RESULT_CONTINUE;
-
-  ObjectExtents object_extents;
-  object_extents.emplace_back(data_object_name(m_image_ctx, object_no),
-                              object_no, object_off, cmp_data.length(), 0);
 
   std::lock_guard cache_locker{m_cache_lock};
   m_object_cacher->flush_set(m_object_set, object_extents, &trace,

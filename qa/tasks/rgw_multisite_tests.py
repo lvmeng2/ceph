@@ -7,6 +7,7 @@ import nose.core
 import nose.config
 import sys
 
+from nose.plugins.manager import DefaultPluginManager
 from teuthology.config import config as teuth_config
 from teuthology.exceptions import ConfigError
 from teuthology.repo_utils import fetch_repo
@@ -68,14 +69,28 @@ class RGWMultisiteTests(Task):
 
         from rgw_multi import multisite, tests
 
-        # create the test user
+        # create test account/user
         log.info('creating test user..')
-        user = multisite.User('rgw-multisite-test-user')
-        user.create(master_zone, ['--display-name', 'Multisite Test User',
+        user = multisite.User('rgw-multisite-test-user', account='RGW11111111111111111')
+        arg = ['--account-id', user.account]
+        arg += master_zone.zone_args()
+        master_zone.cluster.admin(['account', 'create'] + arg)
+        user.create(master_zone, ['--display-name', 'TestUser',
                                   '--gen-access-key', '--gen-secret'])
 
+        # create non-account user
+        log.info('creating non-account user..')
+        non_account_user = multisite.User('rgw-multisite-test-non-account-user')
+        non_account_user.create(master_zone, ['--display-name', 'NonAccountUser',
+                                              '--gen-access-key', '--gen-secret'])
+        # create non-account alt user
+        log.info('creating non-account alt user..')
+        non_account_alt_user = multisite.User('rgw-multisite-test-non-account-alt-user')
+        non_account_alt_user.create(master_zone, ['--display-name', 'NonAccountAltUser',
+                                                  '--gen-access-key', '--gen-secret'])
+
         config = self.config.get('config', {})
-        tests.init_multi(realm, user, tests.Config(**config))
+        tests.init_multi(realm, user, non_account_user, non_account_alt_user, tests.Config(**config))
         tests.realm_meta_checkpoint(realm)
 
     def begin(self):
@@ -90,6 +105,7 @@ class RGWMultisiteTests(Task):
 
         # run nose tests in the module path
         conf = nose.config.Config(stream=get_log_stream(), verbosity=2, workingDir=self.module_path)
+        conf.plugins = DefaultPluginManager() # overrides default = NoPlugins()
         assert nose.run(argv=argv, config=conf), 'rgw multisite test failures'
 
 

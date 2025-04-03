@@ -10,22 +10,22 @@ from teuthology.contextutil import safe_while
 from teuthology.orchestra import run
 from teuthology.exceptions import CommandFailedError
 from tasks.ceph_manager import get_valgrind_args
-from tasks.cephfs.mount import CephFSMount
+from tasks.cephfs.mount import CephFSMountBase, UMOUNT_TIMEOUT
 
 log = logging.getLogger(__name__)
 
 # Refer mount.py for docstrings.
-class FuseMount(CephFSMount):
+class FuseMountBase(CephFSMountBase):
     def __init__(self, ctx, test_dir, client_id, client_remote,
                  client_keyring_path=None, cephfs_name=None,
                  cephfs_mntpt=None, hostfs_mntpt=None, brxnet=None,
                  client_config={}):
-        super(FuseMount, self).__init__(ctx=ctx, test_dir=test_dir,
+        super(FuseMountBase, self).__init__(ctx=ctx, test_dir=test_dir,
             client_id=client_id, client_remote=client_remote,
             client_keyring_path=client_keyring_path, hostfs_mntpt=hostfs_mntpt,
-            cephfs_name=cephfs_name, cephfs_mntpt=cephfs_mntpt, brxnet=brxnet)
+            cephfs_name=cephfs_name, cephfs_mntpt=cephfs_mntpt, brxnet=brxnet,
+            client_config=client_config)
 
-        self.client_config = client_config
         self.fuse_daemon = None
         self._fuse_conn = None
         self.id = None
@@ -42,14 +42,14 @@ class FuseMount(CephFSMount):
         self._mount_cmd_logger = log.getChild('ceph-fuse.{id}'.format(id=self.client_id))
         self._mount_cmd_stdin = run.PIPE
 
-    def mount(self, mntopts=[], check_status=True, **kwargs):
+    def mount(self, mntopts=None, check_status=True, mntargs=None, **kwargs):
         self.update_attrs(**kwargs)
         self.assert_and_log_minimum_mount_details()
 
         self.setup_netns()
 
         try:
-            return self._mount(mntopts, check_status)
+            return self._mount(mntopts, mntargs, check_status)
         except RuntimeError:
             # Catch exceptions by the mount() logic (i.e. not remote command
             # failures) and ensure the mount is not left half-up.
@@ -59,22 +59,20 @@ class FuseMount(CephFSMount):
             self.umount_wait(force=True)
             raise
 
-    def _mount(self, mntopts, check_status):
+    def _mount(self, mntopts, mntargs, check_status):
         log.info("Client client.%s config is %s" % (self.client_id,
                                                     self.client_config))
 
         self._create_mntpt()
 
-        retval = self._run_mount_cmd(mntopts, check_status)
+        retval = self._run_mount_cmd(mntopts, mntargs, check_status)
         if retval:
             return retval
 
         self.gather_mount_info()
 
-        self.mounted = True
-
-    def _run_mount_cmd(self, mntopts, check_status):
-        mount_cmd = self._get_mount_cmd(mntopts)
+    def _run_mount_cmd(self, mntopts, mntargs, check_status):
+        mount_cmd = self._get_mount_cmd(mntopts, mntargs)
         mountcmd_stdout, mountcmd_stderr = StringIO(), StringIO()
 
         # Before starting ceph-fuse process, note the contents of
@@ -89,13 +87,14 @@ class FuseMount(CephFSMount):
             stdin=self._mount_cmd_stdin,
             stdout=mountcmd_stdout,
             stderr=mountcmd_stderr,
-            wait=False
+            wait=False,
+            omit_sudo=False
         )
 
         return self._wait_and_record_our_fuse_conn(
             check_status, pre_mount_conns, mountcmd_stdout, mountcmd_stderr)
 
-    def _get_mount_cmd(self, mntopts):
+    def _get_mount_cmd(self, mntopts, mntargs):
         daemon_signal = 'kill'
         if self.client_config.get('coverage') or \
            self.client_config.get('valgrind') is not None:
@@ -113,12 +112,18 @@ class FuseMount(CephFSMount):
             mount_cmd += ['--id', self.client_id]
         if self.client_keyring_path and self.client_id:
             mount_cmd += ['-k', self.client_keyring_path]
+
+        self.validate_subvol_options()
+
         if self.cephfs_mntpt:
             mount_cmd += ["--client_mountpoint=" + self.cephfs_mntpt]
+
         if self.cephfs_name:
             mount_cmd += ["--client_fs=" + self.cephfs_name]
         if mntopts:
-            mount_cmd += mntopts
+            mount_cmd.extend(('-o', ','.join(mntopts)))
+        if mntargs:
+            mount_cmd.extend(mntargs)
 
         return mount_cmd
 
@@ -139,14 +144,16 @@ class FuseMount(CephFSMount):
 
         self.client_remote.run(args=['sudo', 'modprobe', 'fuse'],
                                check_status=False)
-        self.client_remote.run(
-            args=["sudo", "mount", "-t", "fusectl", conn_dir, conn_dir],
-            check_status=False, timeout=(30))
+
+        if not self.client_remote.is_mounted(conn_dir):
+            self.client_remote.run(
+                args=["sudo", "mount", "-t", "fusectl", conn_dir, conn_dir],
+                timeout=30, omit_sudo=False)
 
         try:
             ls_str = self.client_remote.sh("ls " + conn_dir,
                                            stdout=StringIO(),
-                                           timeout=(15*60)).strip()
+                                           timeout=300).strip()
         except CommandFailedError:
             return []
 
@@ -239,7 +246,7 @@ class FuseMount(CephFSMount):
             stdout=StringIO(),
             stderr=StringIO(),
             wait=False,
-            timeout=(15*60)
+            timeout=300
         )
         try:
             proc.wait()
@@ -277,8 +284,6 @@ class FuseMount(CephFSMount):
 
             time.sleep(5)
 
-        self.mounted = True
-
         # Now that we're mounted, set permissions so that the rest of the test
         # will have unrestricted access to the filesystem mount.
         for retry in range(10):
@@ -286,7 +291,7 @@ class FuseMount(CephFSMount):
                 stderr = StringIO()
                 self.client_remote.run(args=['sudo', 'chmod', '1777',
                                              self.hostfs_mntpt],
-                                       timeout=(15*60),
+                                       timeout=300,
                                        stderr=stderr, omit_sudo=False)
                 break
             except run.CommandFailedError:
@@ -299,7 +304,9 @@ class FuseMount(CephFSMount):
                     raise
 
     def _mountpoint_exists(self):
-        return self.client_remote.run(args=["ls", "-d", self.hostfs_mntpt], check_status=False, timeout=(15*60)).exitstatus == 0
+        return self.client_remote.run(args=["ls", "-d", self.hostfs_mntpt],
+                                      check_status=False,
+                                      timeout=300).exitstatus == 0
 
     def umount(self, cleanup=True):
         """
@@ -310,14 +317,18 @@ class FuseMount(CephFSMount):
             if cleanup:
                 self.cleanup()
             return
+        if self.is_blocked():
+            self._run_umount_lf()
+            if cleanup:
+                self.cleanup()
+            return
 
         try:
             log.info('Running fusermount -u on {name}...'.format(name=self.client_remote.name))
             stderr = StringIO()
-            self.client_remote.run(args=['sudo', 'fusermount', '-u',
-                                         self.hostfs_mntpt],
-                                   stderr=stderr,
-                                   timeout=(30*60), omit_sudo=False)
+            self.client_remote.run(
+                args=['sudo', 'fusermount', '-u', self.hostfs_mntpt],
+                stderr=stderr, timeout=UMOUNT_TIMEOUT, omit_sudo=False)
         except run.CommandFailedError:
             if "mountpoint not found" in stderr.getvalue():
                 # This happens if the mount directory doesn't exist
@@ -331,7 +342,7 @@ class FuseMount(CephFSMount):
                 self.client_remote.run(
                     args=['sudo', run.Raw('PATH=/usr/sbin:$PATH'), 'lsof',
                     run.Raw(';'), 'ps', 'auxf'],
-                    timeout=(60*15), omit_sudo=False)
+                    timeout=UMOUNT_TIMEOUT, omit_sudo=False)
 
                 # abort the fuse mount, killing all hung processes
                 if self._fuse_conn:
@@ -343,17 +354,9 @@ class FuseMount(CephFSMount):
                     """).format(self._fuse_conn))
                     self._fuse_conn = None
 
-                stderr = StringIO()
                 # make sure its unmounted
-                try:
-                    self.client_remote.run(args=['sudo', 'umount', '-l', '-f',
-                                                 self.hostfs_mntpt],
-                                           stderr=stderr, timeout=(60*15), omit_sudo=False)
-                except CommandFailedError:
-                    if self.is_mounted():
-                        raise
+                self._run_umount_lf()
 
-        self.mounted = False
         self._fuse_conn = None
         self.id = None
         self.inst = None
@@ -361,7 +364,8 @@ class FuseMount(CephFSMount):
         if cleanup:
             self.cleanup()
 
-    def umount_wait(self, force=False, require_clean=False, timeout=900):
+    def umount_wait(self, force=False, require_clean=False,
+                    timeout=UMOUNT_TIMEOUT):
         """
         :param force: Complete cleanly even if the MDS is offline
         """
@@ -385,6 +389,11 @@ class FuseMount(CephFSMount):
             # mount -o remount (especially if the remount is stuck because MDSs
             # are unavailable)
 
+        if self.is_blocked():
+            self._run_umount_lf()
+            self.cleanup()
+            return
+
         # cleanup is set to to fail since clieanup must happen after umount is
         # complete; otherwise following call to run.wait hangs.
         self.umount(cleanup=False)
@@ -401,16 +410,13 @@ class FuseMount(CephFSMount):
             if require_clean:
                 raise
 
-        self.mounted = False
         self.cleanup()
 
     def teardown(self):
         """
         Whatever the state of the mount, get it gone.
         """
-        super(FuseMount, self).teardown()
-
-        self.umount()
+        super(FuseMountBase, self).teardown()
 
         if self.fuse_daemon and not self.fuse_daemon.finished:
             self.fuse_daemon.stdin.close()
@@ -418,8 +424,6 @@ class FuseMount(CephFSMount):
                 self.fuse_daemon.wait()
             except CommandFailedError:
                 pass
-
-        self.mounted = False
 
     def _asok_path(self):
         return "/var/run/ceph/ceph-client.{0}.*.asok".format(self.client_id)
@@ -475,7 +479,7 @@ print(_find_admin_socket("{client_name}"))
                     p = self.client_remote.run(args=
                         ['sudo', self._prefix + 'ceph', '--admin-daemon', asok_path] + args,
                         stdout=StringIO(), stderr=StringIO(), wait=False,
-                        timeout=(15*60))
+                        timeout=300)
                     p.wait()
                     break
                 except CommandFailedError:
@@ -528,3 +532,5 @@ print(_find_admin_socket("{client_name}"))
 
     def get_op_read_count(self):
         return self.admin_socket(['perf', 'dump', 'objecter'])['objecter']['osdop_read']
+
+FuseMount = FuseMountBase

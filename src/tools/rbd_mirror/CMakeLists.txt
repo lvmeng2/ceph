@@ -71,6 +71,7 @@ add_library(rbd_mirror_internal STATIC
 add_executable(rbd-mirror
   main.cc)
 target_link_libraries(rbd-mirror
+  legacy-option-headers
   rbd_mirror_internal
   rbd_mirror_types
   rbd_api
@@ -87,4 +88,5 @@ target_link_libraries(rbd-mirror
   heap_profiler
   ${ALLOC_LIBS}
   OpenSSL::SSL)
-install(TARGETS rbd-mirror DESTINATION bin)
+install(TARGETS rbd-mirror
+        DESTINATION ${CMAKE_INSTALL_BINDIR})

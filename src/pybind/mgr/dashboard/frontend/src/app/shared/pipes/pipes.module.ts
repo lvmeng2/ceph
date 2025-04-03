@@ -15,20 +15,33 @@ import { EmptyPipe } from './empty.pipe';
 import { EncodeUriPipe } from './encode-uri.pipe';
 import { FilterPipe } from './filter.pipe';
 import { HealthColorPipe } from './health-color.pipe';
+import { HealthIconPipe } from './health-icon.pipe';
+import { HealthLabelPipe } from './health-label.pipe';
 import { IopsPipe } from './iops.pipe';
 import { IscsiBackstorePipe } from './iscsi-backstore.pipe';
 import { JoinPipe } from './join.pipe';
 import { LogPriorityPipe } from './log-priority.pipe';
 import { MapPipe } from './map.pipe';
+import { MdsSummaryPipe } from './mds-summary.pipe';
+import { MgrSummaryPipe } from './mgr-summary.pipe';
 import { MillisecondsPipe } from './milliseconds.pipe';
 import { NotAvailablePipe } from './not-available.pipe';
 import { OrdinalPipe } from './ordinal.pipe';
+import { OsdSummaryPipe } from './osd-summary.pipe';
 import { RbdConfigurationSourcePipe } from './rbd-configuration-source.pipe';
 import { RelativeDatePipe } from './relative-date.pipe';
 import { RoundPipe } from './round.pipe';
 import { SanitizeHtmlPipe } from './sanitize-html.pipe';
+import { SearchHighlightPipe } from './search-highlight.pipe';
 import { TruncatePipe } from './truncate.pipe';
 import { UpperFirstPipe } from './upper-first.pipe';
+import { OctalToHumanReadablePipe } from './octal-to-human-readable.pipe';
+import { PathPipe } from './path.pipe';
+import { PluralizePipe } from './pluralize.pipe';
+import { XmlPipe } from './xml.pipe';
+import { MbpersecondPipe } from './mbpersecond.pipe';
+import { PipeFunctionPipe } from './pipe-function.pipe';
+import { DimlessBinaryPerMinutePipe } from './dimless-binary-per-minute.pipe';
 
 @NgModule({
   imports: [CommonModule],
@@ -39,6 +52,7 @@ import { UpperFirstPipe } from './upper-first.pipe';
     DimlessBinaryPipe,
     DimlessBinaryPerSecondPipe,
     HealthColorPipe,
+    HealthLabelPipe,
     DimlessPipe,
     CephShortVersionPipe,
     CephReleaseNamePipe,
@@ -60,7 +74,19 @@ import { UpperFirstPipe } from './upper-first.pipe';
     DurationPipe,
     MapPipe,
     TruncatePipe,
-    SanitizeHtmlPipe
+    SanitizeHtmlPipe,
+    SearchHighlightPipe,
+    HealthIconPipe,
+    MgrSummaryPipe,
+    MdsSummaryPipe,
+    OsdSummaryPipe,
+    OctalToHumanReadablePipe,
+    PathPipe,
+    PluralizePipe,
+    XmlPipe,
+    MbpersecondPipe,
+    PipeFunctionPipe,
+    DimlessBinaryPerMinutePipe
   ],
   exports: [
     ArrayPipe,
@@ -69,6 +95,7 @@ import { UpperFirstPipe } from './upper-first.pipe';
     DimlessBinaryPipe,
     DimlessBinaryPerSecondPipe,
     HealthColorPipe,
+    HealthLabelPipe,
     DimlessPipe,
     CephShortVersionPipe,
     CephReleaseNamePipe,
@@ -90,7 +117,19 @@ import { UpperFirstPipe } from './upper-first.pipe';
     DurationPipe,
     MapPipe,
     TruncatePipe,
-    SanitizeHtmlPipe
+    SanitizeHtmlPipe,
+    SearchHighlightPipe,
+    HealthIconPipe,
+    MgrSummaryPipe,
+    MdsSummaryPipe,
+    OsdSummaryPipe,
+    OctalToHumanReadablePipe,
+    PathPipe,
+    PluralizePipe,
+    XmlPipe,
+    MbpersecondPipe,
+    PipeFunctionPipe,
+    DimlessBinaryPerMinutePipe
   ],
   providers: [
     ArrayPipe,
@@ -117,7 +156,14 @@ import { UpperFirstPipe } from './upper-first.pipe';
     DurationPipe,
     MapPipe,
     TruncatePipe,
-    SanitizeHtmlPipe
+    SanitizeHtmlPipe,
+    HealthIconPipe,
+    MgrSummaryPipe,
+    MdsSummaryPipe,
+    OsdSummaryPipe,
+    OctalToHumanReadablePipe,
+    MbpersecondPipe,
+    DimlessBinaryPerMinutePipe
   ]
 })
 export class PipesModule {}

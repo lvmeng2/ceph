@@ -96,7 +96,8 @@ private:
   int wait_for_osdmap();
 
 public:
-  boost::asio::io_context::strand finish_strand{poolctx.get_io_context()};
+  boost::asio::strand<boost::asio::io_context::executor_type>
+      finish_strand{poolctx.get_executor()};
 
   explicit RadosClient(CephContext *cct);
   ~RadosClient() override;
@@ -121,7 +122,7 @@ public:
   int get_fsid(std::string *s);
   int64_t lookup_pool(const char *name);
   bool pool_requires_alignment(int64_t pool_id);
-  int pool_requires_alignment2(int64_t pool_id, bool *requires);
+  int pool_requires_alignment2(int64_t pool_id, bool *req);
   uint64_t pool_required_alignment(int64_t pool_id);
   int pool_required_alignment2(int64_t pool_id, uint64_t *alignment);
   int pool_get_name(uint64_t pool_id, std::string *name,
@@ -131,7 +132,7 @@ public:
   int get_pool_stats(std::list<std::string>& ls, std::map<std::string,::pool_stat_t> *result,
     bool *per_pool);
   int get_fs_stats(ceph_statfs& result);
-  bool get_pool_is_selfmanaged_snaps_mode(const std::string& pool);
+  int pool_is_in_selfmanaged_snaps_mode(const std::string& pool);
 
   /*
   -1 was set as the default value and monitor will pickup the right crush rule with below order:
@@ -190,7 +191,7 @@ public:
   mon_feature_t get_required_monitor_features() const;
 
   int get_inconsistent_pgs(int64_t pool_id, std::vector<std::string>* pgs);
-  const char** get_tracked_conf_keys() const override;
+  std::vector<std::string> get_tracked_keys() const noexcept override;
   void handle_conf_change(const ConfigProxy& conf,
                           const std::set <std::string> &changed) override;
 };

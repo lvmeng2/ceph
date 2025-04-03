@@ -7,12 +7,15 @@
 
 #include "cls/user/cls_user_types.h"
 
+#include "rgw_account.h"
 #include "rgw_basic_types.h"
 #include "rgw_bucket.h"
 #include "rgw_xml.h"
 
 #include "common/ceph_json.h"
 #include "common/Formatter.h"
+#include "cls/user/cls_user_types.h"
+#include "cls/rgw/cls_rgw_types.h"
 
 using std::ostream;
 using std::string;
@@ -84,15 +87,27 @@ void rgw_bucket::generate_test_instances(list<rgw_bucket*>& o)
 }
 
 std::string rgw_bucket_shard::get_key(char tenant_delim, char id_delim,
-                                      char shard_delim) const
+                                      char shard_delim, size_t reserve) const
 {
   static constexpr size_t shard_len{12}; // ":4294967295\0"
-  auto key = bucket.get_key(tenant_delim, id_delim, shard_len);
+  auto key = bucket.get_key(tenant_delim, id_delim, reserve + shard_len);
   if (shard_id >= 0 && shard_delim) {
     key.append(1, shard_delim);
     key.append(std::to_string(shard_id));
   }
   return key;
+}
+
+void encode(const rgw_bucket_shard& b, bufferlist& bl, uint64_t f)
+{
+  encode(b.bucket, bl, f);
+  encode(b.shard_id, bl, f);
+}
+
+void decode(rgw_bucket_shard& b, bufferlist::const_iterator& bl)
+{
+  decode(b.bucket, bl);
+  decode(b.shard_id, bl);
 }
 
 void encode_json_impl(const char *name, const rgw_zone_id& zid, Formatter *f)
@@ -155,12 +170,67 @@ ostream& operator <<(ostream& m, const Principal& p) {
   if (p.is_wildcard()) {
     return m << "*";
   }
+  if (p.is_service()) {
+    return m << p.get_service();
+  }
 
-  m << "arn:aws:iam:" << p.get_tenant() << ":";
-  if (p.is_tenant()) {
+  m << "arn:aws:iam:" << p.get_account() << ":";
+  if (p.is_account()) {
     return m << "root";
   }
   return m << (p.is_user() ? "user/" : "role/") << p.get_id();
 }
 }
+}
+
+// rgw_account_id
+void encode_json_impl(const char* name, const rgw_account_id& id, Formatter* f)
+{
+  f->dump_string(name, id);
+}
+
+void decode_json_obj(rgw_account_id& id, JSONObj* obj)
+{
+  decode_json_obj(static_cast<std::string&>(id), obj);
+}
+
+// rgw_owner variant
+rgw_owner parse_owner(const std::string& str)
+{
+  if (rgw::account::validate_id(str)) {
+    return rgw_account_id{str};
+  } else {
+    return rgw_user{str};
+  }
+}
+
+std::string to_string(const rgw_owner& o)
+{
+  struct visitor {
+    std::string operator()(const rgw_account_id& a) { return a; }
+    std::string operator()(const rgw_user& u) { return u.to_str(); }
+  };
+  return std::visit(visitor{}, o);
+}
+
+std::ostream& operator<<(std::ostream& out, const rgw_owner& o)
+{
+  struct visitor {
+    std::ostream& out;
+    std::ostream& operator()(const rgw_account_id& a) { return out << a; }
+    std::ostream& operator()(const rgw_user& u) { return out << u; }
+  };
+  return std::visit(visitor{out}, o);
+}
+
+void encode_json_impl(const char *name, const rgw_owner& o, ceph::Formatter *f)
+{
+  encode_json(name, to_string(o), f);
+}
+
+void decode_json_obj(rgw_owner& o, JSONObj *obj)
+{
+  std::string str;
+  decode_json_obj(str, obj);
+  o = parse_owner(str);
 }

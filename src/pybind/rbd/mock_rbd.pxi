@@ -3,6 +3,11 @@
 from libc.stdint cimport *
 from ctime cimport time_t, timespec
 
+# Make the bool type available as libcpp.bool, for both C and C++.
+cimport libcpp
+cdef extern from "<stdbool.h>":
+    pass
+
 cdef nogil:
     enum:
         _LIBRADOS_SNAP_HEAD "LIBRADOS_SNAP_HEAD"
@@ -44,6 +49,8 @@ cdef nogil:
         _RBD_IMAGE_OPTION_STRIPE_UNIT "RBD_IMAGE_OPTION_STRIPE_UNIT"
         _RBD_IMAGE_OPTION_STRIPE_COUNT "RBD_IMAGE_OPTION_STRIPE_COUNT"
         _RBD_IMAGE_OPTION_DATA_POOL "RBD_IMAGE_OPTION_DATA_POOL"
+        _RBD_IMAGE_OPTION_FLATTEN "RBD_IMAGE_OPTION_FLATTEN"
+        _RBD_IMAGE_OPTION_CLONE_FORMAT "RBD_IMAGE_OPTION_CLONE_FORMAT"
 
         RBD_MAX_BLOCK_NAME_SIZE
         RBD_MAX_IMAGE_NAME_SIZE
@@ -56,6 +63,9 @@ cdef nogil:
         _RBD_SNAP_REMOVE_FORCE "RBD_SNAP_REMOVE_FORCE"
 
         _RBD_WRITE_ZEROES_FLAG_THICK_PROVISION "RBD_WRITE_ZEROES_FLAG_THICK_PROVISION"
+
+        _RBD_DIFF_ITERATE_FLAG_INCLUDE_PARENT "RBD_DIFF_ITERATE_FLAG_INCLUDE_PARENT"
+        _RBD_DIFF_ITERATE_FLAG_WHOLE_OBJECT "RBD_DIFF_ITERATE_FLAG_WHOLE_OBJECT"
 
     ctypedef void* rados_t
     ctypedef void* rados_ioctx_t
@@ -82,6 +92,10 @@ cdef nogil:
         int64_t group_pool
         char *group_name
         char *group_snap_name
+
+    ctypedef struct rbd_snap_trash_namespace_t:
+        rbd_snap_namespace_type_t original_namespace_type;
+        char *original_name;
 
     ctypedef enum rbd_snap_mirror_state_t:
         _RBD_SNAP_MIRROR_STATE_PRIMARY "RBD_SNAP_MIRROR_STATE_PRIMARY"
@@ -129,6 +143,7 @@ cdef nogil:
         _RBD_MIRROR_MODE_DISABLED "RBD_MIRROR_MODE_DISABLED"
         _RBD_MIRROR_MODE_IMAGE "RBD_MIRROR_MODE_IMAGE"
         _RBD_MIRROR_MODE_POOL "RBD_MIRROR_MODE_POOL"
+        _RBD_MIRROR_MODE_INIT_ONLY "RBD_MIRROR_MODE_INIT_ONLY"
 
     ctypedef enum rbd_mirror_peer_direction_t:
         _RBD_MIRROR_PEER_DIRECTION_RX "RBD_MIRROR_PEER_DIRECTION_RX"
@@ -217,9 +232,22 @@ cdef nogil:
         _RBD_GROUP_SNAP_STATE_INCOMPLETE "RBD_GROUP_SNAP_STATE_INCOMPLETE"
         _RBD_GROUP_SNAP_STATE_COMPLETE "RBD_GROUP_SNAP_STATE_COMPLETE"
 
-    ctypedef struct rbd_group_snap_info_t:
+    ctypedef enum rbd_group_snap_namespace_type_t:
+        _RBD_GROUP_SNAP_NAMESPACE_TYPE_USER "RBD_GROUP_SNAP_NAMESPACE_TYPE_USER"
+
+    ctypedef struct rbd_group_image_snap_info_t:
+        char *image_name
+        int64_t pool_id
+        uint64_t snap_id
+
+    ctypedef struct rbd_group_snap_info2_t:
+        char *id
         char *name
+        char *image_snap_name
         rbd_group_snap_state_t state
+        rbd_group_snap_namespace_type_t namespace_type
+        size_t image_snaps_count
+        rbd_group_image_snap_info_t *image_snaps
 
     ctypedef enum rbd_image_migration_state_t:
         _RBD_IMAGE_MIGRATION_STATE_UNKNOWN "RBD_IMAGE_MIGRATION_STATE_UNKNOWN"
@@ -267,6 +295,7 @@ cdef nogil:
     ctypedef enum rbd_encryption_format_t:
         _RBD_ENCRYPTION_FORMAT_LUKS1 "RBD_ENCRYPTION_FORMAT_LUKS1"
         _RBD_ENCRYPTION_FORMAT_LUKS2 "RBD_ENCRYPTION_FORMAT_LUKS2"
+        _RBD_ENCRYPTION_FORMAT_LUKS "RBD_ENCRYPTION_FORMAT_LUKS"
 
     ctypedef enum rbd_encryption_algorithm_t:
         _RBD_ENCRYPTION_ALGORITHM_AES128 "RBD_ENCRYPTION_ALGORITHM_AES128"
@@ -282,7 +311,16 @@ cdef nogil:
         const char* passphrase
         size_t passphrase_size
 
+    ctypedef struct rbd_encryption_luks_format_options_t:
+        const char* passphrase
+        size_t passphrase_size
+
     ctypedef void* rbd_encryption_options_t
+
+    ctypedef struct rbd_encryption_spec_t:
+        rbd_encryption_format_t format
+        rbd_encryption_options_t opts
+        size_t opts_size
 
     void rbd_version(int *major, int *minor, int *extra):
         pass
@@ -331,6 +369,10 @@ cdef nogil:
         pass
     int rbd_clone3(rados_ioctx_t p_ioctx, const char *p_name,
                    const char *p_snapname, rados_ioctx_t c_ioctx,
+                   const char *c_name, rbd_image_options_t c_opts):
+        pass
+    int rbd_clone4(rados_ioctx_t p_ioctx, const char *p_name,
+                   uint64_t p_snap_id, rados_ioctx_t c_ioctx,
                    const char *c_name, rbd_image_options_t c_opts):
         pass
     int rbd_remove_with_progress(rados_ioctx_t io, const char *name,
@@ -401,6 +443,14 @@ cdef nogil:
     int rbd_mirror_mode_get(rados_ioctx_t io, rbd_mirror_mode_t *mirror_mode):
         pass
     int rbd_mirror_mode_set(rados_ioctx_t io, rbd_mirror_mode_t mirror_mode):
+        pass
+
+    int rbd_mirror_remote_namespace_get(rados_ioctx_t io_ctx,
+                                        char *remote_namespace,
+                                        size_t *max_len):
+        pass
+    int rbd_mirror_remote_namespace_set(rados_ioctx_t io_ctx,
+                                        const char *remote_namespace):
         pass
 
     int rbd_mirror_uuid_get(rados_ioctx_t io_ctx, char *mirror_uuid,
@@ -627,7 +677,7 @@ cdef nogil:
     int rbd_snap_is_protected(rbd_image_t image, const char *snap_name,
                               int *is_protected):
         pass
-    int rbd_snap_exists(rbd_image_t image, const char *snapname, bint *exists):
+    int rbd_snap_exists(rbd_image_t image, const char *snapname, libcpp.bool *exists):
         pass
     int rbd_snap_get_limit(rbd_image_t image, uint64_t *limit):
         pass
@@ -656,8 +706,12 @@ cdef nogil:
     void rbd_snap_group_namespace_cleanup(rbd_snap_group_namespace_t *group_spec,
                                           size_t snap_group_namespace_size):
         pass
-    int rbd_snap_get_trash_namespace(rbd_image_t image, uint64_t snap_id,
-                                     char *original_name, size_t max_length):
+    int rbd_snap_get_trash_namespace2(rbd_image_t image, uint64_t snap_id,
+                                      rbd_snap_trash_namespace_t *trash_snap,
+                                      size_t trash_snap_size):
+        pass
+    void rbd_snap_trash_namespace_cleanup(rbd_snap_trash_namespace_t *trash_snap,
+                                          size_t trash_snap_size):
         pass
     int rbd_snap_get_mirror_namespace(
         rbd_image_t image, uint64_t snap_id,
@@ -724,6 +778,12 @@ cdef nogil:
     int rbd_diff_iterate2(rbd_image_t image, const char *fromsnapname,
                          uint64_t ofs, uint64_t len,
                          uint8_t include_parent, uint8_t whole_object,
+                         int (*cb)(uint64_t, size_t, int, void *)
+                             nogil except? -9000,
+                         void *arg) except? -9000:
+        pass
+    int rbd_diff_iterate3(rbd_image_t image, uint64_t from_snap_id,
+                         uint64_t ofs, uint64_t len, uint32_t flags,
                          int (*cb)(uint64_t, size_t, int, void *)
                              nogil except? -9000,
                          void *arg) except? -9000:
@@ -824,6 +884,9 @@ cdef nogil:
         pass
     int rbd_group_list(rados_ioctx_t p, char *names, size_t *size):
         pass
+    int rbd_group_get_id(rados_ioctx_t p, const char *group_name,
+                         char *group_id, size_t *size):
+        pass
     int rbd_group_rename(rados_ioctx_t p, const char *src, const char *dest):
         pass
     void rbd_group_info_cleanup(rbd_group_info_t *group_info,
@@ -854,14 +917,19 @@ cdef nogil:
                               const char *old_snap_name,
                               const char *new_snap_name):
         pass
-    int rbd_group_snap_list(rados_ioctx_t group_p,
-                            const char *group_name,
-                            rbd_group_snap_info_t *snaps,
-                            size_t group_snap_info_size,
-                            size_t *snaps_size):
+    int rbd_group_snap_list2(rados_ioctx_t group_p,
+                             const char *group_name,
+                             rbd_group_snap_info2_t *snaps,
+                             size_t *snaps_size):
         pass
-    void rbd_group_snap_list_cleanup(rbd_group_snap_info_t *snaps,
-                                     size_t group_snap_info_size, size_t len):
+    void rbd_group_snap_list2_cleanup(rbd_group_snap_info2_t *snaps,
+                                      size_t len):
+        pass
+    int rbd_group_snap_get_info(rados_ioctx_t group_p, const char *group_name,
+                                const char *snap_name,
+                                rbd_group_snap_info2_t *group_snap):
+        pass
+    void rbd_group_snap_get_info_cleanup(rbd_group_snap_info2_t *group_snap):
         pass
     int rbd_group_snap_rollback(rados_ioctx_t group_p, const char *group_name,
                                 const char *snap_name):
@@ -886,7 +954,7 @@ cdef nogil:
                            size_t *size):
         pass
     int rbd_namespace_exists(rados_ioctx_t io, const char *namespace_name,
-                             bint *exists):
+                             libcpp.bool *exists):
         pass
     int rbd_pool_init(rados_ioctx_t io, bint force):
         pass
@@ -904,6 +972,10 @@ cdef nogil:
                               rbd_encryption_options_t opts, size_t opts_size):
         pass
     int rbd_encryption_load(rbd_image_t image,
-                              rbd_encryption_format_t format,
-                              rbd_encryption_options_t opts, size_t opts_size):
+                            rbd_encryption_format_t format,
+                            rbd_encryption_options_t opts, size_t opts_size):
+        pass
+    int rbd_encryption_load2(rbd_image_t image,
+                             const rbd_encryption_spec_t *specs,
+                             size_t spec_count):
         pass

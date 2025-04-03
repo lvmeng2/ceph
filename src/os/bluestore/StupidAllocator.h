@@ -7,13 +7,14 @@
 #include <mutex>
 
 #include "Allocator.h"
+#include "AllocatorBase.h"
 #include "include/btree_map.h"
 #include "include/interval_set.h"
 #include "os/bluestore/bluestore_types.h"
 #include "include/mempool.h"
 #include "common/ceph_mutex.h"
 
-class StupidAllocator : public Allocator {
+class StupidAllocator : public AllocatorBase {
   CephContext* cct;
   ceph::mutex lock = ceph::make_mutex("StupidAllocator::lock");
 
@@ -30,10 +31,6 @@ class StupidAllocator : public Allocator {
 
   unsigned _choose_bin(uint64_t len);
   void _insert_free(uint64_t offset, uint64_t len);
-
-  uint64_t _aligned_len(
-    interval_set_t::iterator p,
-    uint64_t alloc_unit);
 
 public:
   StupidAllocator(CephContext* cct,
@@ -61,7 +58,7 @@ public:
   double get_fragmentation() override;
 
   void dump() override;
-  void dump(std::function<void(uint64_t offset, uint64_t length)> notify) override;
+  void foreach(std::function<void(uint64_t offset, uint64_t length)> notify) override;
 
   void init_add_free(uint64_t offset, uint64_t length) override;
   void init_rm_free(uint64_t offset, uint64_t length) override;

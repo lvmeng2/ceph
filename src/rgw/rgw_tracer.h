@@ -8,21 +8,17 @@
 namespace tracing {
 namespace rgw {
 
-const auto OP = "op";
+
 const auto BUCKET_NAME = "bucket_name";
 const auto USER_ID = "user_id";
 const auto OBJECT_NAME = "object_name";
-const auto RETURN = "return";
+const auto OP_RESULT = "op_result";
 const auto UPLOAD_ID = "upload_id";
-const auto TYPE = "type";
-const auto REQUEST = "request";
 const auto MULTIPART = "multipart_upload ";
+const auto TRANS_ID = "trans_id";
+const auto HOST_ID = "host_id";
 
-#ifdef HAVE_JAEGER
-extern thread_local tracing::Tracer tracer;
-#else
 extern tracing::Tracer tracer;
-#endif
 
 } // namespace rgw
 } // namespace tracing

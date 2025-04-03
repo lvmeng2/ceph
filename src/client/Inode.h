@@ -13,6 +13,9 @@
 
 #include "mds/flock.h"
 #include "mds/mdstypes.h" // hrm
+#include "include/cephfs/types.h"
+
+#include "messages/MClientReply.h"
 
 #include "osdc/ObjectCacher.h"
 
@@ -96,9 +99,6 @@ struct CapSnap {
   bool writing = false, dirty_data = false;
   uint64_t flush_tid = 0;
 
-  int64_t cap_dirtier_uid = -1;
-  int64_t cap_dirtier_gid = -1;
-
   explicit CapSnap(Inode *i)
     : in(i)
   {}
@@ -115,6 +115,7 @@ struct CapSnap {
 #define I_ERROR_FILELOCK	(1 << 5)
 
 struct Inode : RefCountedObject {
+  ceph::coarse_mono_time hold_caps_until;
   Client *client;
 
   // -- the actual inode --
@@ -165,6 +166,10 @@ struct Inode : RefCountedObject {
 
   std::vector<uint8_t> fscrypt_auth;
   std::vector<uint8_t> fscrypt_file;
+
+  decltype(InodeStat::optmetadata) optmetadata;
+  using optkind_t = decltype(InodeStat::optmetadata)::optkind_t;
+
   bool is_fscrypt_enabled() {
     return !!fscrypt_auth.size();
   }
@@ -215,7 +220,6 @@ struct Inode : RefCountedObject {
   int cache_gen = 0;
   int snap_caps = 0;
   int snap_cap_refs = 0;
-  utime_t hold_caps_until;
   xlist<Inode*>::item delay_cap_item, dirty_cap_item, flushing_cap_item;
 
   SnapRealm *snaprealm = 0;
@@ -240,8 +244,9 @@ struct Inode : RefCountedObject {
   std::map<frag_t,int> fragmap;  // known frag -> mds mappings
   std::map<frag_t, std::vector<mds_rank_t>> frag_repmap; // non-auth mds mappings
 
-  std::list<ceph::condition_variable*> waitfor_caps;
-  std::list<ceph::condition_variable*> waitfor_commit;
+  std::vector<Context*> waitfor_caps;
+  std::vector<Context*> waitfor_caps_pending;
+  std::vector<Context*> waitfor_commit;
   std::list<ceph::condition_variable*> waitfor_deleg;
 
   Dentry *get_first_parent() {
@@ -251,6 +256,7 @@ struct Inode : RefCountedObject {
 
   void make_long_path(filepath& p);
   void make_short_path(filepath& p);
+  bool make_path_string(std::string& s);
   void make_nosnap_relative_path(filepath& p);
 
   // The ref count. 1 for each dentry, fh, inode_map,
@@ -329,6 +335,15 @@ struct Inode : RefCountedObject {
   void rm_fh(Fh *f) {fhs.erase(f);}
   void set_async_err(int r);
   void dump(Formatter *f) const;
+  void print(std::ostream&) const;
+
+  bool has_charmap() const {
+    return optmetadata.has_opt(optkind_t::CHARMAP);
+  }
+  auto& get_charmap() const {
+    auto& opt = optmetadata.get_opt(optkind_t::CHARMAP);
+    return opt.template get_meta< charmap_md_t >();
+  }
 
   void break_all_delegs() { break_deleg(false); };
 
@@ -359,7 +374,5 @@ private:
   bool delegations_broken(bool skip_read);
 
 };
-
-std::ostream& operator<<(std::ostream &out, const Inode &in);
 
 #endif

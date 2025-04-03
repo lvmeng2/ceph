@@ -5,6 +5,7 @@
  * Author: Igor Fedotov, ifedotov@suse.com
  */
 #include <iostream>
+#include <vector>
 
 #include "common/ceph_argparse.h"
 #include "common/debug.h"
@@ -12,13 +13,24 @@
 #include "common/errno.h"
 #include "common/ceph_json.h"
 #include "common/admin_socket.h"
+#include "include/denc.h"
 #include "global/global_init.h"
 #include "os/bluestore/Allocator.h"
+#include "os/bluestore/AllocatorBase.h"
 
 using namespace std;
 
 void usage(const string &name) {
-  cerr << "Usage: " << name << " <log_to_replay> <raw_duplicate|free_dump|try_alloc count want alloc_unit|replay_alloc alloc_list_file>" << std::endl;
+  cerr << "Usage: " << name << " <log_to_replay|free-dump> "
+       << " raw_duplicates|"
+          "duplicates|"
+          "free_dump|"
+          "assess_free <alloc_unit>|"
+          "try_alloc <count> <want> <alloc_unit>|"
+          "replay_alloc <alloc_list_file|"
+          "export_binary <out_file>|"
+          "free_histogram [<alloc_unit>] [<num_buckets>]"
+       << std::endl;
 }
 
 void usage_replay_alloc(const string &name) {
@@ -27,6 +39,17 @@ void usage_replay_alloc(const string &name) {
   cerr << "The \"alloc_list_file\" parameter should be a file with allocation requests, one per line." << std::endl;
   cerr << "Allocation request format (space separated, optional parameters are 0 if not given): want unit [max] [hint]" << std::endl;
 }
+
+struct binary_alloc_map_t {
+  std::vector<std::pair<uint64_t, uint64_t>> free_extents;
+
+  DENC(binary_alloc_map_t, v, p) {
+    DENC_START(1, 1, p);
+    denc(v.free_extents, p);
+    DENC_FINISH(p);
+  }
+};
+WRITE_CLASS_DENC(binary_alloc_map_t)
 
 int replay_and_check_for_duplicate(char* fname)
 {
@@ -234,13 +257,14 @@ int replay_and_check_for_duplicate(char* fname)
   return 0;
 }
 
-/*
-* This replays allocator dump (in JSON) reported by 
-  "ceph daemon <osd> bluestore allocator dump <name>"
-  command and applies custom method to it
-*/
-int replay_free_dump_and_apply(char* fname,
-    std::function<int (Allocator*, const string& aname)> fn)
+int replay_free_dump_and_apply_raw(
+    char* fname,
+    std::function<void (
+      std::string_view,
+      int64_t,
+      int64_t,
+      std::string_view)> create,
+    std::function<void (uint64_t, uint64_t)> add_ext)
 {
   string alloc_type;
   string alloc_name;
@@ -273,44 +297,114 @@ int replay_free_dump_and_apply(char* fname,
   ceph_assert(o);
   decode_json_obj(alloc_unit, o);
 
-  o = p.find_obj("extents");
-  ceph_assert(o);
-  ceph_assert(o->is_array());
+  int fd = -1;
+  o = p.find_obj("extents_file");
+  if (o) {
+    string filename = o->get_data_val().str;
+    fd = open(filename.c_str(), O_RDONLY);
+    if (fd < 0) {
+      std::cerr << "error: unable to open extents file: " << filename
+              << ", " << cpp_strerror(-errno)
+              << std::endl;
+      return -1;
+    }
+  } else {
+    o = p.find_obj("extents");
+    ceph_assert(o);
+    ceph_assert(o->is_array());
+  }
   std::cout << "parsing completed!" << std::endl;
 
-  unique_ptr<Allocator> alloc;
-  alloc.reset(Allocator::create(g_ceph_context, alloc_type,
-				capacity, alloc_unit, 0, 0, alloc_name));
+  create(alloc_type, capacity, alloc_unit, alloc_name);
+  int r = 0;
+  if (fd < 0) {
+    auto it = o->find_first();
+    while (!it.end()) {
+      auto *item_obj = *it;
+      uint64_t offset = 0;
+      uint64_t length = 0;
+      string offset_str, length_str;
 
-  auto it = o->find_first();
-  while (!it.end()) {
-    auto *item_obj = *it;
-    uint64_t offset = 0;
-    uint64_t length = 0;
-    string offset_str, length_str;
+      bool b = JSONDecoder::decode_json("offset", offset_str, item_obj);
+      ceph_assert(b);
+      b = JSONDecoder::decode_json("length", length_str, item_obj);
+      ceph_assert(b);
 
-    bool b = JSONDecoder::decode_json("offset", offset_str, item_obj);
-    ceph_assert(b);
-    b = JSONDecoder::decode_json("length", length_str, item_obj);
-    ceph_assert(b);
+      char* p;
+      offset = strtol(offset_str.c_str(), &p, 16);
+      length = strtol(length_str.c_str(), &p, 16);
 
-    char* p;
-    offset = strtol(offset_str.c_str(), &p, 16);
-    length = strtol(length_str.c_str(), &p, 16);
-
-    // intentionally skip/trim entries that are above the capacity,
-    // just to be able to "shrink" allocator by editing that field
-    if (offset < capacity) {
-      if (offset + length > capacity) {
-        length = offset + length - capacity;
+      // intentionally skip/trim entries that are above the capacity,
+      // just to be able to "shrink" allocator by editing that field
+      if (offset < capacity) {
+        if (offset + length > capacity) {
+          length = offset + length - capacity;
+        }
+        add_ext(offset, length);
       }
-      alloc->init_add_free(offset, length);
+      ++it;
     }
-
-    ++it;
+  } else {
+    bufferlist bl;
+    char buf[4096];
+    do {
+      r = read(fd, buf, sizeof(buf));
+      if (r > 0) {
+        bl.append(buf, r);
+      }
+    } while(r > 0);
+    if (r < 0) {
+      std::cerr << "error: error reading from extents file: "
+              << cpp_strerror(-errno)
+              << std::endl;
+    } else {
+      auto p = bl.cbegin();
+      binary_alloc_map_t amap;
+      try {
+        decode(amap, p);
+        for (auto p : amap.free_extents) {
+          add_ext(p.first, p.second);
+        }
+      } catch (ceph::buffer::error& e) {
+        std::cerr << __func__ << " unable to decode extents "
+                  << ": " << e.what()
+	          << std::endl;
+	r = -1;
+      }
+    }
+    close(fd);
   }
+  return r;
+}
 
-  int r = fn(alloc.get(), alloc_name);
+/*
+* This replays allocator dump (in JSON) reported by
+  "ceph daemon <osd> bluestore allocator dump <name>"
+  command and applies custom method to it
+*/
+int replay_free_dump_and_apply(char* fname,
+    std::function<int (Allocator*, const string& aname)> fn)
+{
+  unique_ptr<Allocator> alloc;
+  auto create_fn = [&](std::string_view alloc_type,
+                       int64_t capacity,
+                       int64_t alloc_unit,
+                       std::string_view alloc_name) {
+    alloc.reset(
+      Allocator::create(
+        g_ceph_context, alloc_type, capacity, alloc_unit, alloc_name));
+  };
+  auto add_fn = [&](uint64_t offset,
+                   uint64_t len) {
+    alloc->init_add_free(offset, len);
+  };
+  int r = replay_free_dump_and_apply_raw(
+    fname,
+    create_fn,
+    add_fn);
+  if (r == 0) {
+    r = fn(alloc.get(), alloc->get_name());
+  }
 
   return r;
 }
@@ -335,9 +429,115 @@ void dump_alloc(Allocator* alloc, const string& aname)
   }
 }
 
+int export_as_binary(char* fname, char* target_fname)
+{
+  int fd = creat(target_fname, 0);
+  if (fd < 0) {
+    std::cerr << "error: unable to open target file: " << target_fname
+              << ", " << cpp_strerror(-errno)
+              << std::endl;
+    return -1;
+  }
+
+  binary_alloc_map_t amap;
+  auto dummy_create_fn =
+   [&](std::string_view alloc_type,
+       int64_t capacity,
+       int64_t alloc_unit,
+       std::string_view alloc_name) {
+  };
+  auto add_fn = [&](uint64_t offset,
+                    uint64_t len) {
+    amap.free_extents.emplace_back(offset, len);
+  };
+  int r = replay_free_dump_and_apply_raw(
+    fname,
+    dummy_create_fn,
+    add_fn);
+  if (r == 0) {
+    bufferlist out;
+    ceph::encode(amap, out);
+    auto w = write(fd, out.c_str(), out.length());
+    if (w < 1) {
+      std::cerr << "error: unable to open target file: " << target_fname
+                << ", " << cpp_strerror(-errno)
+                << std::endl;
+    }
+  }
+  close(fd);
+  return r;
+}
+
+int check_duplicates(char* fname)
+{
+  interval_set<uint64_t> free_extents;
+  interval_set<uint64_t> invalid_extentsA;
+  interval_set<uint64_t> invalid_extentsB;
+  auto dummy_create_fn =
+   [&](std::string_view alloc_type,
+       int64_t capacity,
+       int64_t alloc_unit,
+       std::string_view alloc_name) {
+  };
+  size_t errors = 0;
+  size_t pos = 0;
+  size_t first_err_pos = 0;
+  auto add_fn = [&](uint64_t offset,
+                    uint64_t len) {
+    ++pos;
+    if (free_extents.intersects(offset, len)) {
+      invalid_extentsB.insert(offset, len);
+      ++errors;
+      if (first_err_pos == 0) {
+        first_err_pos = pos;
+      }
+   } else {
+     free_extents.insert(offset, len);
+   }
+  };
+  int r = replay_free_dump_and_apply_raw(
+    fname,
+    dummy_create_fn,
+    add_fn);
+  if (r < 0) {
+    return r;
+  }
+  pos = 0;
+  auto add_fn2 = [&](uint64_t offset,
+                     uint64_t len) {
+    ++pos;
+    if (pos < first_err_pos) {
+      if (invalid_extentsB.intersects(offset, len)) {
+        invalid_extentsA.insert(offset, len);
+      }
+    }
+  };
+  r = replay_free_dump_and_apply_raw(
+    fname,
+    dummy_create_fn,
+    add_fn2);
+  ceph_assert(r >= 0);
+  auto itA = invalid_extentsA.begin();
+  auto itB = invalid_extentsB.begin();
+  while (itA != invalid_extentsA.end()) {
+   std::cerr << "error: overlapping extents: " << std::hex
+                  << itA.get_start() << "~" << itA.get_end() - itA.get_start()
+                  << " vs.";
+    while (itB != invalid_extentsB.end() &&
+           itB.get_start() >= itA.get_start() &&
+           itB.get_end() <= itA.get_end()) {
+      std::cerr << " " << itB.get_start() << "~" << itB.get_end() - itB.get_start();
+      ++itB;
+    }
+   std::cerr << std::dec << std::endl;
+    ++itA;
+  }
+  return r >= 0 ? errors != 0 : r;
+}
+
 int main(int argc, char **argv)
 {
-  vector<const char*> args;
+  auto args = argv_to_vec(argc, argv);
   auto cct = global_init(NULL, args, CEPH_ENTITY_TYPE_CLIENT,
 			 CODE_ENVIRONMENT_UTILITY,
 			 CINIT_FLAG_NO_DEFAULT_CONFIG_FILE);
@@ -348,9 +548,32 @@ int main(int argc, char **argv)
     usage(argv[0]);
     return 1;
   }
-  if (strcmp(argv[2], "raw_duplicate") == 0) {
+  if (strcmp(argv[2], "raw_duplicates") == 0) {
     return replay_and_check_for_duplicate(argv[1]);
   } else if (strcmp(argv[2], "free_dump") == 0) {
+    return replay_free_dump_and_apply(argv[1],
+      [&](Allocator* a, const string& aname) {
+        ceph_assert(a);
+        std::cout << "Fragmentation:" << a->get_fragmentation()
+                  << std::endl;
+        std::cout << "Fragmentation score:" << a->get_fragmentation_score()
+                  << std::endl;
+        std::cout << "Free: 0x" << std::hex << a->get_free() << std::dec
+                  << std::endl;
+        {
+        // stub to implement various testing stuff on properly initialized allocator
+        // e.g. one can dump allocator back via dump_alloc(a, aname);
+        }
+        return 0;
+      });
+  } else if (strcmp(argv[2], "assess_free") == 0) {
+    if (argc < 4) {
+      std::cerr << "Error: insufficient arguments for \"assess_free_extents\" operation."
+                << std::endl;
+      usage(argv[0]);
+      return 1;
+    }
+    auto alloc_unit = strtoul(argv[3], nullptr, 10);
     return replay_free_dump_and_apply(argv[1],
       [&](Allocator* a, const string& aname) {
         ceph_assert(a);
@@ -361,8 +584,21 @@ int main(int argc, char **argv)
         std::cout << "Free:" << std::hex << a->get_free() << std::dec
                   << std::endl;
         {
-        // stub to implement various testing stuff on properly initialized allocator
-        // e.g. one can dump allocator back via dump_alloc(a, aname);
+          uint64_t available = 0;
+          uint64_t available2 = 0;
+          a->foreach([&](uint64_t offs, uint64_t len) {
+            auto a = p2align(len, alloc_unit);
+            available += a;
+            auto a0 = p2roundup(offs, alloc_unit);
+            a = p2align(offs + len, alloc_unit);
+            if (a > a0) {
+              available2 += a - a0;
+            }
+          });
+          std::cout << "Available: 0x" << std::hex << available
+                    << " Available(strict align): 0x" << available2
+                    << " alloc_unit: 0x" << alloc_unit << std::dec
+                    << std::endl;
         }
         return 0;
       });
@@ -384,22 +620,42 @@ int main(int argc, char **argv)
                   << std::endl;
         std::cout << "Fragmentation score:" << a->get_fragmentation_score()
                   << std::endl;
-        std::cout << "Free:" << std::hex << a->get_free() << std::dec
+        std::cout << "Free: 0x" << std::hex << a->get_free() << std::dec
                   << std::endl;
         {
+          auto t00 = ceph::mono_clock::now();
           PExtentVector extents;
           for(size_t i = 0; i < count; i++) {
-              extents.clear();
-              auto r = a->allocate(want, alloc_unit, 0, &extents);
-              if (r < 0) {
-                  std::cerr << "Error: allocation failure at step:" << i + 1
-                            << ", ret = " << r << std::endl;
-              return -1;
+            extents.clear();
+	    auto t0 = ceph::mono_clock::now();
+            auto r = a->allocate(want, alloc_unit, 0, &extents);
+            std::cout << "Duration (ns): " << (ceph::mono_clock::now() - t0).count() << std::endl;
+            if (r < 0) {
+              std::cerr << "Error: allocation failure at step:" << i + 1
+                        << ", ret = " << r
+			<< " elapsed (ns): " << (ceph::mono_clock::now() - t00).count()
+                        << std::endl;
+	      return -1;
+            } else if ((size_t)r < want) {
+              std::cerr << "Error: allocation failure at step:" << i + 1
+                        << ", allocated " << r << " of " << want
+			<< " elapsed (ns): " << (ceph::mono_clock::now() - t00).count()
+                        << std::endl;
+	      return -1;
             }
+            std::cout << ">allocated: " << r << std::endl;
+
+            std::cout << "Extents:" << std::hex;
+            for (auto& e : extents) {
+              std::cout << e.offset << "~" << e.length << " ";
+            }
+            std::cout << std::dec << std::endl;
 	  }
+          std::cout << "Successfully allocated: " << count << " * " << want
+                    << ", unit:" << alloc_unit
+		    << " elapsed (ns): " << (ceph::mono_clock::now() - t00).count()
+		    << std::endl;
         }
-        std::cout << "Successfully allocated: " << count << " * " << want
-                  << ", unit:" << alloc_unit << std::endl;
         return 0;
       });
   } else if (strcmp(argv[2], "replay_alloc") == 0) {
@@ -416,7 +672,7 @@ int main(int argc, char **argv)
                   << std::endl;
         std::cout << "Fragmentation score:" << a->get_fragmentation_score()
                   << std::endl;
-        std::cout << "Free:" << std::hex << a->get_free() << std::dec
+        std::cout << "Free: 0x" << std::hex << a->get_free() << std::dec
                   << std::endl;
         {
           /* replay a set of allocation requests */
@@ -465,7 +721,7 @@ int main(int argc, char **argv)
                           << std::endl;
                 std::cerr << "Fragmentation score:" << a->get_fragmentation_score()
                           << std::endl;
-                std::cerr << "Free:" << std::hex << a->get_free() << std::dec
+                std::cerr << "Free: 0x" << std::hex << a->get_free() << std::dec
                           << std::endl;
                 /* return 0 if the allocator ran out of space */
                 if (r == -ENOSPC) {
@@ -478,7 +734,8 @@ int main(int argc, char **argv)
               std::cout << "Duration (ns): " << (ceph::mono_clock::now() - t0).count()
                         << " want/unit/max/hint (hex): " << std::hex
                         << want << "/" << unit << "/" << max << "/" << hint
-                        << std::dec << std::endl;
+                        << std::dec << " res fragments " << extents.size()
+                        << std::endl;
 
               /* Do not release. */
               //alloc->release(extents);
@@ -491,10 +748,54 @@ int main(int argc, char **argv)
                     << std::endl;
           std::cout << "Fragmentation score:" << a->get_fragmentation_score()
                     << std::endl;
-          std::cout << "Free:" << std::hex << a->get_free() << std::dec
+          std::cout << "Free: 0x" << std::hex << a->get_free() << std::dec
                     << std::endl;
         }
         return 0;
     });
+  } else if (strcmp(argv[2], "free_histogram") == 0) {
+    uint64_t alloc_unit = 4096;
+    auto num_buckets = 8;
+    if (argc >= 4) {
+      alloc_unit = strtoul(argv[3], nullptr, 10);
+    }
+    if (argc >= 5) {
+      num_buckets = strtoul(argv[4], nullptr, 10);
+    }
+    return replay_free_dump_and_apply(argv[1],
+      [&](Allocator *a, const string &aname) {
+        ceph_assert(a);
+        std::cout << "Fragmentation:" << a->get_fragmentation()
+                  << std::endl;
+        std::cout << "Fragmentation score:" << a->get_fragmentation_score()
+                  << std::endl;
+        std::cout << "Free: 0x" << std::hex << a->get_free() << std::dec
+                  << std::endl;
+        std::cout << "Allocation unit:" << alloc_unit
+                  << std::endl;
+
+        AllocatorBase::FreeStateHistogram hist(num_buckets);
+        a->foreach(
+          [&](size_t off, size_t len) {
+            hist.record_extent(uint64_t(alloc_unit), off, len);
+          });
+
+        uint64_t s = 0;
+        hist.foreach(
+          [&](uint64_t max_len, uint64_t total, uint64_t aligned, uint64_t units) {
+            uint64_t e = max_len;
+            std::cout << "(" << s << ".." << e << "]"
+              << " -> " << total
+              << " chunks, " << aligned << " aligned with "
+              << units << " alloc_units."
+              << std::endl;
+            s = e;
+          });
+	return 0;
+    });
+  } else if (strcmp(argv[2], "export_binary") == 0) {
+    return export_as_binary(argv[1], argv[3]);
+  } else if (strcmp(argv[2], "duplicates") == 0) {
+    return check_duplicates(argv[1]);
   }
 }

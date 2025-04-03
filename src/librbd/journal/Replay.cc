@@ -14,6 +14,8 @@
 #include "librbd/io/AioCompletion.h"
 #include "librbd/io/ImageRequest.h"
 
+#include <shared_mutex> // for std::shared_lock
+
 #define dout_subsys ceph_subsys_rbd
 #undef dout_prefix
 #define dout_prefix *_dout << "librbd::journal::Replay: " << this << " "
@@ -218,8 +220,8 @@ void Replay<I>::process(const EventEntry &event_entry,
     return;
   }
 
-  boost::apply_visitor(EventVisitor(this, on_ready, on_safe),
-                       event_entry.event);
+  std::visit(EventVisitor(this, on_ready, on_safe),
+             event_entry.event);
 }
 
 template <typename I>
@@ -356,8 +358,8 @@ void Replay<I>::handle_event(const journal::AioDiscardEvent &event,
   if (!clipped_io(event.offset, aio_comp)) {
     io::ImageRequest<I>::aio_discard(&m_image_ctx, aio_comp,
                                      {{event.offset, event.length}},
-                                     event.discard_granularity_bytes,
-                                     m_image_ctx.get_data_io_context(), {});
+                                     io::ImageArea::DATA,
+                                     event.discard_granularity_bytes, {});
   }
 
   if (flush_required) {
@@ -391,8 +393,8 @@ void Replay<I>::handle_event(const journal::AioWriteEvent &event,
   if (!clipped_io(event.offset, aio_comp)) {
     io::ImageRequest<I>::aio_write(&m_image_ctx, aio_comp,
                                    {{event.offset, event.length}},
-                                   std::move(data),
-                                   m_image_ctx.get_data_io_context(), 0, {});
+                                   io::ImageArea::DATA, std::move(data),
+                                   0, {});
   }
 
   if (flush_required) {
@@ -445,9 +447,8 @@ void Replay<I>::handle_event(const journal::AioWriteSameEvent &event,
   if (!clipped_io(event.offset, aio_comp)) {
     io::ImageRequest<I>::aio_writesame(&m_image_ctx, aio_comp,
                                        {{event.offset, event.length}},
-                                       std::move(data),
-                                       m_image_ctx.get_data_io_context(), 0,
-                                       {});
+                                       io::ImageArea::DATA, std::move(data),
+                                       0, {});
   }
 
   if (flush_required) {
@@ -479,11 +480,10 @@ void Replay<I>::handle_event(const journal::AioWriteSameEvent &event,
   if (!clipped_io(event.offset, aio_comp)) {
     io::ImageRequest<I>::aio_compare_and_write(&m_image_ctx, aio_comp,
                                                {{event.offset, event.length}},
+                                               io::ImageArea::DATA,
                                                std::move(cmp_data),
                                                std::move(write_data),
-                                               nullptr,
-                                               m_image_ctx.get_data_io_context(),
-                                               0, {});
+                                               nullptr, 0, {});
   }
 
   if (flush_required) {

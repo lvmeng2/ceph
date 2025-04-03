@@ -25,7 +25,10 @@ export class RgwDaemonService {
     return this.http.get<RgwDaemon[]>(this.url).pipe(
       tap((daemons: RgwDaemon[]) => {
         this.daemons.next(daemons);
-        if (_.isEmpty(this.selectedDaemon.getValue())) {
+        const selectedDaemon = this.selectedDaemon.getValue();
+        // Set or re-select the default daemon if the current one is not
+        // in the list anymore.
+        if (_.isEmpty(selectedDaemon) || undefined === _.find(daemons, { id: selectedDaemon.id })) {
           this.selectDefaultDaemon(daemons);
         }
       })
@@ -75,5 +78,16 @@ export class RgwDaemonService {
         return next(params);
       })
     );
+  }
+
+  setMultisiteConfig(realm_name: string, zonegroup_name: string, zone_name: string) {
+    return this.request((params: HttpParams) => {
+      params = params.appendAll({
+        realm_name: realm_name,
+        zonegroup_name: zonegroup_name,
+        zone_name: zone_name
+      });
+      return this.http.put(`${this.url}/set_multisite_config`, null, { params: params });
+    });
   }
 }

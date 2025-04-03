@@ -13,6 +13,7 @@
  */
 
 #include <filesystem>
+#include <memory>
 #include "common/async/context_pool.h"
 #include "common/ceph_argparse.h"
 #include "common/code_environment.h"
@@ -22,6 +23,7 @@
 #include "common/signal.h"
 #include "common/version.h"
 #include "erasure-code/ErasureCodePlugin.h"
+#include "extblkdev/ExtBlkDevPlugin.h"
 #include "global/global_context.h"
 #include "global/global_init.h"
 #include "global/pidfile.h"
@@ -198,6 +200,10 @@ global_init(const std::map<std::string,std::string> *defaults,
   // manually. If they have, update them.
   if (g_ceph_context->get_init_flags() != flags) {
     g_ceph_context->set_init_flags(flags);
+    if (flags & (CINIT_FLAG_NO_DEFAULT_CONFIG_FILE|
+		 CINIT_FLAG_NO_MON_CONFIG)) {
+      g_conf()->no_mon_config = true;
+    }
   }
 
   #ifndef _WIN32
@@ -263,10 +269,14 @@ global_init(const std::map<std::string,std::string> *defaults,
     if (g_conf()->setgroup.length() > 0) {
       gid = atoi(g_conf()->setgroup.c_str());
       if (!gid) {
-	char buf[4096];
+	// There's no actual well-defined max that I could find in
+	// library documentation. If we're allocating on the heap,
+	// 64KiB seems at least reasonable.
+	static constexpr std::size_t size = 64 * 1024;
+	auto buf = std::make_unique_for_overwrite<char[]>(size);
 	struct group gr;
 	struct group *g = 0;
-	getgrnam_r(g_conf()->setgroup.c_str(), &gr, buf, sizeof(buf), &g);
+	getgrnam_r(g_conf()->setgroup.c_str(), &gr, buf.get(), size, &g);
 	if (!g) {
 	  cerr << "unable to look up group '" << g_conf()->setgroup << "'"
 	       << ": " << cpp_strerror(errno) << std::endl;
@@ -313,6 +323,13 @@ global_init(const std::map<std::string,std::string> *defaults,
 	     << std::endl;
 	exit(1);
       }
+#if defined(HAVE_SYS_PRCTL_H)
+      if (g_conf().get_val<bool>("set_keepcaps")) {
+	if (prctl(PR_SET_KEEPCAPS, 1) == -1) {
+	  cerr << "warning: unable to set keepcaps flag: " << cpp_strerror(errno) << std::endl;
+	}
+      }
+#endif
       if (setuid(uid) != 0) {
 	cerr << "unable to setuid " << uid << ": " << cpp_strerror(errno)
 	     << std::endl;
@@ -484,9 +501,17 @@ void global_init_daemonize(CephContext *cct)
 #endif
 }
 
+/* Make file descriptors 0, 1, and possibly 2 point to /dev/null.
+ *
+ * Instead of just closing fd, we redirect it to /dev/null with dup2().
+ * We have to do this because otherwise some arbitrary call to open() later
+ * in the program might get back one of these file descriptors. It's hard to
+ * guarantee that nobody ever writes to stdout, even though they're not
+ * supposed to.
+ */
 int reopen_as_null(CephContext *cct, int fd)
 {
-  int newfd = open(DEV_NULL, O_RDONLY | O_CLOEXEC);
+  int newfd = open(DEV_NULL, O_RDWR | O_CLOEXEC);
   if (newfd < 0) {
     int err = errno;
     lderr(cct) << __func__ << " failed to open /dev/null: " << cpp_strerror(err)
@@ -517,14 +542,6 @@ void global_init_postfork_start(CephContext *cct)
   cct->_log->start();
   cct->notify_post_fork();
 
-  /* This is the old trick where we make file descriptors 0, 1, and possibly 2
-   * point to /dev/null.
-   *
-   * We have to do this because otherwise some arbitrary call to open() later
-   * in the program might get back one of these file descriptors. It's hard to
-   * guarantee that nobody ever writes to stdout, even though they're not
-   * supposed to.
-   */
   reopen_as_null(cct, STDIN_FILENO);
 
   const auto& conf = cct->_conf;
@@ -571,15 +588,10 @@ void global_init_chdir(const CephContext *cct)
   }
 }
 
-/* Map stderr to /dev/null. This isn't really re-entrant; we rely on the old unix
- * behavior that the file descriptor that gets assigned is the lowest
- * available one.
- */
 int global_init_shutdown_stderr(CephContext *cct)
 {
   reopen_as_null(cct, STDERR_FILENO);
-  int l = cct->_conf->err_to_stderr ? -1 : -2;
-  cct->_log->set_stderr_level(l, l);
+  cct->_log->set_stderr_level(-2, -2);
   return 0;
 }
 

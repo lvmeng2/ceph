@@ -1,11 +1,16 @@
 #ifndef CEPH_JSON_H
 #define CEPH_JSON_H
 
+#include <deque>
+#include <map>
+#include <set>
 #include <stdexcept>
+#include <string>
 #include <typeindex>
 #include <include/types.h>
 #include <boost/container/flat_map.hpp>
 #include <boost/container/flat_set.hpp>
+#include <boost/optional.hpp>
 #include <include/ceph_fs.h>
 #include "common/ceph_time.h"
 
@@ -220,8 +225,8 @@ void decode_json_obj(std::set<T>& l, JSONObj *obj)
   }
 }
 
-template<class T>
-void decode_json_obj(boost::container::flat_set<T>& l, JSONObj *obj)
+template<class T, class Compare, class Alloc>
+void decode_json_obj(boost::container::flat_set<T, Compare, Alloc>& l, JSONObj *obj)
 {
   l.clear();
 
@@ -339,7 +344,9 @@ bool JSONDecoder::decode_json(const char *name, T& val, JSONObj *obj, bool manda
       std::string s = "missing mandatory field " + std::string(name);
       throw err(s);
     }
-    val = T();
+    if constexpr (std::is_default_constructible_v<T>) {
+      val = T();
+    }
     return false;
   }
 
@@ -512,6 +519,7 @@ static void encode_json(const char *name, const T& val, ceph::Formatter *f)
 
 class utime_t;
 
+void encode_json(const char *name, std::string_view val, ceph::Formatter *f);
 void encode_json(const char *name, const std::string& val, ceph::Formatter *f);
 void encode_json(const char *name, const char *val, ceph::Formatter *f);
 void encode_json(const char *name, bool val, ceph::Formatter *f);
@@ -557,9 +565,9 @@ static void encode_json(const char *name, const std::set<T, Compare>& l, ceph::F
   f->close_section();
 }
 
-template<class T, class Compare = std::less<T> >
+template<class T, class Compare, class Alloc>
 static void encode_json(const char *name,
-                        const boost::container::flat_set<T, Compare>& l,
+                        const boost::container::flat_set<T, Compare, Alloc>& l,
                         ceph::Formatter *f)
 {
   f->open_array_section(name);
@@ -571,6 +579,17 @@ static void encode_json(const char *name,
 
 template<class T>
 static void encode_json(const char *name, const std::vector<T>& l, ceph::Formatter *f)
+{
+  f->open_array_section(name);
+  for (auto iter = l.cbegin(); iter != l.cend(); ++iter) {
+    encode_json("obj", *iter, f);
+  }
+  f->close_section();
+}
+
+template<class T, std::size_t N>
+static void encode_json(const char *name, const std::array<T, N>& l,
+                        ceph::Formatter *f)
 {
   f->open_array_section(name);
   for (auto iter = l.cbegin(); iter != l.cend(); ++iter) {
@@ -831,6 +850,61 @@ public:
       value.quoted = true;
     }
     DECODE_FINISH(bl);
+  }
+
+  void dump(ceph::Formatter *f) const {
+    switch (type) {
+      case FMT_VALUE:
+        if (value.quoted) {
+          f->dump_string("value", value.str);
+        } else {
+          f->dump_format_unquoted("value", "%s", value.str.c_str());
+        }
+        break;
+      case FMT_ARRAY:
+        f->open_array_section("array");
+        for (auto& i : arr) {
+          i.dump(f);
+        }
+        f->close_section();
+        break;
+      case FMT_OBJ:
+        f->open_object_section("object");
+        for (auto& i : obj) {
+          f->dump_object(i.first.c_str(), i.second);
+        }
+        f->close_section();
+        break;
+      default:
+        break;
+    }
+  }
+  static void generate_test_instances(std::list<JSONFormattable*>& o) {
+    o.push_back(new JSONFormattable);
+    o.push_back(new JSONFormattable);
+    o.back()->set_type(FMT_VALUE);
+    o.back()->value.str = "foo";
+    o.back()->value.quoted = true;
+    o.push_back(new JSONFormattable);
+    o.back()->set_type(FMT_VALUE);
+    o.back()->value.str = "foo";
+    o.back()->value.quoted = false;
+    o.push_back(new JSONFormattable);
+    o.back()->set_type(FMT_ARRAY);
+    o.back()->arr.push_back(JSONFormattable());
+    o.back()->arr.back().set_type(FMT_VALUE);
+    o.back()->arr.back().value.str = "foo";
+    o.back()->arr.back().value.quoted = true;
+    o.back()->arr.push_back(JSONFormattable());
+    o.back()->arr.back().set_type(FMT_VALUE);
+    o.back()->arr.back().value.str = "bar";
+    o.back()->arr.back().value.quoted = true;
+    o.push_back(new JSONFormattable);
+    o.back()->set_type(FMT_OBJ);
+    o.back()->obj["foo"] = JSONFormattable();
+    o.back()->obj["foo"].set_type(FMT_VALUE);
+    o.back()->obj["foo"].value.str = "bar";
+    o.back()->obj["foo"].value.quoted = true;
   }
 
   const std::string& val() const {

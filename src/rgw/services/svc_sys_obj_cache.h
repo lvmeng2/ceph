@@ -4,10 +4,12 @@
 #pragma once
 
 #include "common/RWLock.h"
-#include "rgw/rgw_service.h"
-#include "rgw/rgw_cache.h"
+#include "rgw_service.h"
+#include "rgw_cache.h"
 
 #include "svc_sys_obj_core.h"
+
+#include <shared_mutex> // for std::shared_lock
 
 class RGWSI_Notify;
 
@@ -17,7 +19,7 @@ class RGWSI_SysObj_Cache_ASocketHook;
 class RGWSI_SysObj_Cache : public RGWSI_SysObj_Core
 {
   friend class RGWSI_SysObj_Cache_CB;
-  friend class RGWServices_Def;
+  friend RGWServices_Def;
   friend class ASocketHandler;
 
   RGWSI_Notify *notify_svc{nullptr};
@@ -27,27 +29,28 @@ class RGWSI_SysObj_Cache : public RGWSI_SysObj_Core
 
   void normalize_pool_and_obj(const rgw_pool& src_pool, const std::string& src_obj, rgw_pool& dst_pool, std::string& dst_obj);
 protected:
-  void init(RGWSI_RADOS *_rados_svc,
+  void init(librados::Rados* rados_,
             RGWSI_Zone *_zone_svc,
             RGWSI_Notify *_notify_svc) {
-    core_init(_rados_svc, _zone_svc);
+    core_init(rados_, _zone_svc);
     notify_svc = _notify_svc;
   }
 
   int do_start(optional_yield, const DoutPrefixProvider *dpp) override;
   void shutdown() override;
 
-  int raw_stat(const DoutPrefixProvider *dpp, const rgw_raw_obj& obj, uint64_t *psize, real_time *pmtime, uint64_t *epoch,
-               std::map<std::string, bufferlist> *attrs, bufferlist *first_chunk,
+  int raw_stat(const DoutPrefixProvider *dpp, const rgw_raw_obj& obj,
+               uint64_t *psize, real_time *pmtime,
+               std::map<std::string, bufferlist> *attrs,
                RGWObjVersionTracker *objv_tracker,
                optional_yield y) override;
 
   int read(const DoutPrefixProvider *dpp,
-           RGWSysObjectCtxBase& obj_ctx,
            RGWSI_SysObj_Obj_GetObjState& read_state,
            RGWObjVersionTracker *objv_tracker,
            const rgw_raw_obj& obj,
            bufferlist *bl, off_t ofs, off_t end,
+           ceph::real_time* pmtime, uint64_t* psize,
            std::map<std::string, bufferlist> *attrs,
 	   bool raw_attrs,
            rgw_cache_entry_info *cache_info,
@@ -62,10 +65,9 @@ protected:
                 std::map<std::string, bufferlist>& attrs,
                 std::map<std::string, bufferlist> *rmattrs,
                 RGWObjVersionTracker *objv_tracker,
-                optional_yield y);
+                bool exclusive, optional_yield y) override;
 
   int remove(const DoutPrefixProvider *dpp, 
-             RGWSysObjectCtxBase& obj_ctx,
              RGWObjVersionTracker *objv_tracker,
              const rgw_raw_obj& obj,
              optional_yield y) override;
@@ -80,12 +82,12 @@ protected:
             real_time set_mtime,
             optional_yield y) override;
 
-  int write_data(const DoutPrefixProvider *dpp, 
+  int write_data(const DoutPrefixProvider *dpp,
                  const rgw_raw_obj& obj,
                  const bufferlist& bl,
                  bool exclusive,
                  RGWObjVersionTracker *objv_tracker,
-                 optional_yield y);
+                 optional_yield y) override;
 
   int distribute_cache(const DoutPrefixProvider *dpp, const std::string& normal_name, const rgw_raw_obj& obj,
                        ObjectCacheInfo& obj_info, int op,

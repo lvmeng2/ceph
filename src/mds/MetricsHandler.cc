@@ -1,14 +1,18 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
 // vim: ts=8 sw=2 smarttab
 
+#include "MetricsHandler.h"
+
 #include "common/debug.h"
 #include "common/errno.h"
+#include "include/cephfs/metrics/Types.h"
 
+#include "messages/MClientMetrics.h"
 #include "messages/MMDSMetrics.h"
+#include "messages/MMDSPing.h"
 
 #include "MDSRank.h"
 #include "SessionMap.h"
-#include "MetricsHandler.h"
 
 #define dout_context g_ceph_context
 #define dout_subsys ceph_subsys_mds
@@ -20,16 +24,7 @@ MetricsHandler::MetricsHandler(CephContext *cct, MDSRank *mds)
     mds(mds) {
 }
 
-bool MetricsHandler::ms_can_fast_dispatch2(const cref_t<Message> &m) const {
-  return m->get_type() == CEPH_MSG_CLIENT_METRICS || m->get_type() == MSG_MDS_PING;
-}
-
-void MetricsHandler::ms_fast_dispatch2(const ref_t<Message> &m) {
-  bool handled = ms_dispatch2(m);
-  ceph_assert(handled);
-}
-
-bool MetricsHandler::ms_dispatch2(const ref_t<Message> &m) {
+Dispatcher::dispatch_result_t MetricsHandler::ms_dispatch2(const ref_t<Message> &m) {
   if (m->get_type() == CEPH_MSG_CLIENT_METRICS &&
       m->get_connection()->get_peer_type() == CEPH_ENTITY_TYPE_CLIENT) {
     handle_client_metrics(ref_cast<MClientMetrics>(m));
@@ -51,6 +46,7 @@ void MetricsHandler::init() {
   dout(10) << dendl;
 
   updater = std::thread([this]() {
+      ceph_pthread_setname("mds-metrics");
       std::unique_lock locker(lock);
       while (!stopping) {
         double after = g_conf().get_val<std::chrono::seconds>("mds_metrics_update_interval").count();
@@ -166,7 +162,9 @@ void MetricsHandler::handle_payload(Session *session, const CapInfoPayload &payl
 
 void MetricsHandler::handle_payload(Session *session, const ReadLatencyPayload &payload) {
   dout(20) << ": type=" << payload.get_type()
-	   << ", session=" << session << ", latency=" << payload.lat << dendl;
+           << ", session=" << session << ", latency=" << payload.lat
+           << ", avg=" << payload.mean << ", sq_sum=" << payload.sq_sum
+           << ", count=" << payload.count << dendl;
 
   auto it = client_metrics_map.find(session->info.inst);
   if (it == client_metrics_map.end()) {
@@ -176,12 +174,17 @@ void MetricsHandler::handle_payload(Session *session, const ReadLatencyPayload &
   auto &metrics = it->second.second;
   metrics.update_type = UPDATE_TYPE_REFRESH;
   metrics.read_latency_metric.lat = payload.lat;
+  metrics.read_latency_metric.mean = payload.mean;
+  metrics.read_latency_metric.sq_sum = payload.sq_sum;
+  metrics.read_latency_metric.count = payload.count;
   metrics.read_latency_metric.updated = true;
 }
 
 void MetricsHandler::handle_payload(Session *session, const WriteLatencyPayload &payload) {
   dout(20) << ": type=" << payload.get_type()
-	   << ", session=" << session << ", latency=" << payload.lat << dendl;
+           << ", session=" << session << ", latency=" << payload.lat
+           << ", avg=" << payload.mean << ", sq_sum=" << payload.sq_sum
+           << ", count=" << payload.count << dendl;
 
   auto it = client_metrics_map.find(session->info.inst);
   if (it == client_metrics_map.end()) {
@@ -191,12 +194,17 @@ void MetricsHandler::handle_payload(Session *session, const WriteLatencyPayload 
   auto &metrics = it->second.second;
   metrics.update_type = UPDATE_TYPE_REFRESH;
   metrics.write_latency_metric.lat = payload.lat;
+  metrics.write_latency_metric.mean = payload.mean;
+  metrics.write_latency_metric.sq_sum = payload.sq_sum;
+  metrics.write_latency_metric.count = payload.count;
   metrics.write_latency_metric.updated = true;
 }
 
 void MetricsHandler::handle_payload(Session *session, const MetadataLatencyPayload &payload) {
   dout(20) << ": type=" << payload.get_type()
-	   << ", session=" << session << ", latency=" << payload.lat << dendl;
+           << ", session=" << session << ", latency=" << payload.lat
+           << ", avg=" << payload.mean << ", sq_sum=" << payload.sq_sum
+           << ", count=" << payload.count << dendl;
 
   auto it = client_metrics_map.find(session->info.inst);
   if (it == client_metrics_map.end()) {
@@ -206,6 +214,9 @@ void MetricsHandler::handle_payload(Session *session, const MetadataLatencyPaylo
   auto &metrics = it->second.second;
   metrics.update_type = UPDATE_TYPE_REFRESH;
   metrics.metadata_latency_metric.lat = payload.lat;
+  metrics.metadata_latency_metric.mean = payload.mean;
+  metrics.metadata_latency_metric.sq_sum = payload.sq_sum;
+  metrics.metadata_latency_metric.count = payload.count;
   metrics.metadata_latency_metric.updated = true;
 }
 
@@ -316,6 +327,11 @@ void MetricsHandler::handle_payload(Session *session, const UnknownPayload &payl
 }
 
 void MetricsHandler::handle_client_metrics(const cref_t<MClientMetrics> &m) {
+  if (!mds->is_active_lockless()) {
+    dout(20) << ": dropping metrics message during recovery" << dendl;
+    return;
+  }
+
   std::scoped_lock locker(lock);
 
   Session *session = mds->get_session(m);

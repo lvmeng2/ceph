@@ -199,6 +199,9 @@ class ESZone(Zone):
     def has_buckets(self):
         return False
 
+    def has_roles(self):
+        return False
+
     class Conn(ZoneConn):
         def __init__(self, zone, credentials):
             super(ESZone.Conn, self).__init__(zone, credentials)
@@ -239,6 +242,36 @@ class ESZone(Zone):
             log.info('success, bucket identical: bucket=%s zones={%s, %s}', bucket_name, self.name, zone_conn.name)
 
             return True
+
+        def create_role(self, path, rolename, policy_document, tag_list):
+            assert False
+
+        def delete_role(self, role_name):
+            assert False
+
+        def has_role(self, role_name):
+            assert False
+
+        def create_topic(self, topicname, attributes):
+            assert False
+
+        def delete_topic(self, topic_arn):
+            assert False
+
+        def list_topics(self):
+            assert False
+
+        def get_topic(self, topic_arn):
+            assert False
+
+        def create_notification(self, bucket_name, config):
+            assert False
+
+        def delete_notification(self, bucket_name):
+            assert False
+
+        def list_notifications(self, bucket_name):
+            assert False
 
     def get_conn(self, credentials):
         return self.Conn(self, credentials)

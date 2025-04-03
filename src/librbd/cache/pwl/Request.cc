@@ -5,6 +5,8 @@
 #include "librbd/BlockGuard.h"
 #include "librbd/cache/pwl/LogEntry.h"
 #include "librbd/cache/pwl/AbstractWriteLog.h"
+#include "common/Clock.h" // for ceph_clock_now()
+#include "common/debug.h"
 
 #define dout_subsys ceph_subsys_rbd_pwl
 #undef dout_prefix
@@ -251,7 +253,7 @@ bool C_WriteRequest<T>::append_write_request(std::shared_ptr<SyncPoint> sync_poi
   std::lock_guard locker(m_lock);
   auto write_req_sp = this;
   if (sync_point->earlier_sync_point) {
-    Context *schedule_append_ctx = new LambdaContext([this, write_req_sp](int r) {
+    Context *schedule_append_ctx = new LambdaContext([write_req_sp](int r) {
         write_req_sp->schedule_append();
       });
     sync_point->earlier_sync_point->on_sync_point_appending.push_back(schedule_append_ctx);

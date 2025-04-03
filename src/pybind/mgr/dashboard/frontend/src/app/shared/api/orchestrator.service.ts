@@ -11,7 +11,7 @@ import { OrchestratorStatus } from '../models/orchestrator.interface';
   providedIn: 'root'
 })
 export class OrchestratorService {
-  private url = 'api/orchestrator';
+  private url = 'ui-api/orchestrator';
 
   disableMessages = {
     noOrchestrator: $localize`The feature is disabled because Orchestrator is not available.`,
@@ -42,5 +42,9 @@ export class OrchestratorService {
       return this.disableMessages.missingFeature;
     }
     return false;
+  }
+
+  getName() {
+    return this.http.get(`${this.url}/get_name`);
   }
 }

@@ -2,6 +2,7 @@
 ---
 
 headers: |
+  #include <bit>
   #include <regex>
   // rbd feature and io operation validation
   #include "include/stringify.h"
@@ -293,6 +294,8 @@ options:
   default: 0
   services:
   - rbd
+  see_also:
+  - mon_osd_blocklist_default_expire
 - name: rbd_request_timed_out_seconds
   type: uint
   level: advanced
@@ -321,7 +324,7 @@ options:
       uint64_t f = strict_si_cast<uint64_t>(*value, error_message);
       if (!error_message->empty()) {
         return -EINVAL;
-      } else if (!isp2(f)) {
+      } else if (!std::has_single_bit(f)) {
         *error_message = "value must be a power of two";
         return -EINVAL;
       }
@@ -393,7 +396,7 @@ options:
   - rbd
 - name: rbd_validate_pool
   type: bool
-  level: advanced
+  level: dev
   desc: validate empty pools for RBD compatibility
   default: true
   services:
@@ -466,7 +469,7 @@ options:
   type: uint
   level: advanced
   desc: mirroring snapshots limit
-  default: 3
+  default: 5
   services:
   - rbd
   min: 3
@@ -830,13 +833,6 @@ options:
   - disabled
   - rwl
   - ssd
-- name: rbd_persistent_cache_log_periodic_stats
-  type: bool
-  level: advanced
-  desc: emit periodic perf stats to debug log
-  default: false
-  services:
-  - rbd
 - name: rbd_persistent_cache_size
   type: uint
   level: advanced

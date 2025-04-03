@@ -273,10 +273,14 @@ TBD.
 Get User Info
 =============
 
-Get user information.
+Get user information. Cap ``users`` or ``user-info-without-keys`` must be set to ``read`` to run this operation.
+If cap ``user-info-without-keys`` is set to ``read`` or ``*``, S3 keys and Swift keys will not be
+included in the response unless the user running this operation is the system user, an admin user, or the cap ``users`` is set to ``read``.
 
-:caps: users=read
+Either a ``uid`` or ``access-key`` must be supplied as a request parameter. We recommend supplying uid.
+If both are provided but correspond to different users, the info for the user specified with ``uid`` will be returned.
 
+:caps: users=read or user-info-without-keys=read
 
 Syntax
 ~~~~~~
@@ -296,6 +300,13 @@ Request Parameters
 :Type: String
 :Example: ``foo_user``
 :Required: Yes
+
+``access-key``
+
+:Description: The S3 access key of the user for which the information is requested.
+:Type: String
+:Example: ``ABCD0EF12GHIJ2K34LMN``
+:Required: No
 
 
 Response Entities
@@ -473,6 +484,19 @@ A tenant name may also specified as a part of ``uid``, by following the syntax
 :Description: the Tenant under which a user is a part of.
 :Type: string
 :Example: tenant1
+:Required: No
+
+``default-placement``
+
+:Description: default placement for the user.
+:Type: string
+:Example: default-placement
+:Required: No
+
+``default-storage-class``
+:Description: default storage class for the user, default-placement must be defined when setting this option.
+:Type: string
+:Example: STANDARD-1A
 :Required: No
 
 Response Entities
@@ -670,6 +694,19 @@ Request Parameters
 :Description: The op-mask of the user to be modified.
 :Type: String
 :Example: ``read, write, delete, *``
+:Required: No
+
+``default-placement``
+
+:Description: default placement for the user.
+:Type: string
+:Example: default-placement
+:Required: No
+
+``default-storage-class``
+:Description: default storage class for the user, default-placement must be defined when setting this option.
+:Type: string
+:Example: STANDARD-1A
 :Required: No
 
 Response Entities
@@ -1150,7 +1187,14 @@ Request Parameters
 
 :Description: Generate a new key pair and add to the existing keyring.
 :Type: Boolean
-:Example: True [``True``]
+:Example: True [True]
+:Required: No
+
+``active``
+
+:Description: Activate or deactivate a key.
+:Type: Boolean
+:Example: True [True]
 :Required: No
 
 
@@ -2131,12 +2175,18 @@ Binding libraries
 
 ``Golang``
 
+ - `ceph/go-ceph`_
  - `IrekFasikhov/go-rgwadmin`_
  - `QuentinPerez/go-radosgw`_
-
-``Java``
  
+``Java``
+
  - `twonote/radosgw-admin4j`_
+
+``PHP``
+
+ - `lbausch/php-ceph-radosgw-admin`_
+ - `myENA/php-rgw-api`_
 
 ``Python``
 
@@ -2147,10 +2197,14 @@ Binding libraries
 
 .. _Admin Guide: ../admin
 .. _Quota Management: ../admin#quota-management
+.. _IrekFasikhov/go-rgwadmin: https://github.com/IrekFasikhov/go-rgwadmin
+.. _QuentinPerez/go-radosgw: https://github.com/QuentinPerez/go-radosgw
+.. _ceph/go-ceph: https://github.com/ceph/go-ceph/
 .. _Rate Limit Management: ../admin#rate-limit-management
 .. _IrekFasikhov/go-rgwadmin: https://github.com/IrekFasikhov/go-rgwadmin
 .. _QuentinPerez/go-radosgw: https://github.com/QuentinPerez/go-radosgw
 .. _twonote/radosgw-admin4j: https://github.com/twonote/radosgw-admin4j
+.. _lbausch/php-ceph-radosgw-admin: https://github.com/lbausch/php-ceph-radosgw-admin
+.. _myENA/php-rgw-api: https://github.com/myENA/php-rgw-api
 .. _UMIACS/rgwadmin: https://github.com/UMIACS/rgwadmin
 .. _valerytschopp/python-radosgw-admin: https://github.com/valerytschopp/python-radosgw-admin
-

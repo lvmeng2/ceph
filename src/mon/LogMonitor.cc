@@ -42,6 +42,7 @@
 
 #include <boost/algorithm/string/predicate.hpp>
 
+#include <iterator>
 #include <sstream>
 #include <syslog.h>
 
@@ -60,10 +61,12 @@
 #include "include/str_list.h"
 #include "include/str_map.h"
 #include "include/compat.h"
+#include "include/utime_fmt.h"
 
 #define dout_subsys ceph_subsys_mon
 
 using namespace TOPNSPC::common;
+using namespace std::literals;
 
 using std::cerr;
 using std::cout;
@@ -206,11 +209,10 @@ ceph::logging::JournaldClusterLogger &LogMonitor::log_channel_info::get_journald
 void LogMonitor::log_channel_info::clear()
 {
   log_to_syslog.clear();
-  syslog_level.clear();
   syslog_facility.clear();
   log_file.clear();
   expanded_log_file.clear();
-  log_file_level.clear();
+  log_level.clear();
   log_to_graylog.clear();
   log_to_graylog_host.clear();
   log_to_graylog_port.clear();
@@ -354,20 +356,25 @@ void LogMonitor::log_external(const LogEntry& le)
     channel = CLOG_CHANNEL_CLUSTER;
   }
 
+  string level = channels.get_log_level(channel);
+  if (int log_level = LogEntry::str_to_level(level);log_level > le.prio) {
+    // Do not log LogEntry to any external entity if le.prio is
+    // less than channel log level.
+    return;
+  }
+
   if (g_conf().get_val<bool>("mon_cluster_log_to_stderr")) {
     cerr << channel << " " << le << std::endl;
   }
 
   if (channels.do_log_to_syslog(channel)) {
-    string level = channels.get_level(channel);
     string facility = channels.get_facility(channel);
     if (level.empty() || facility.empty()) {
       derr << __func__ << " unable to log to syslog -- level or facility"
 	   << " not defined (level: " << level << ", facility: "
 	   << facility << ")" << dendl;
     } else {
-      le.log_to_syslog(channels.get_level(channel),
-		       channels.get_facility(channel));
+      le.log_to_syslog(level, facility);
     }
   }
 
@@ -386,17 +393,19 @@ void LogMonitor::log_external(const LogEntry& le)
     dout(7) << "journald: " << channel << dendl;
   }
 
+  bool do_stderr = g_conf().get_val<bool>("mon_cluster_log_to_stderr");
+  int fd = -1;
   if (g_conf()->mon_cluster_log_to_file) {
+    if (this->log_rotated.exchange(false)) {
+      this->log_external_close_fds();
+    }
+
     auto p = channel_fds.find(channel);
-    int fd;
     if (p == channel_fds.end()) {
       string log_file = channels.get_log_file(channel);
       dout(20) << __func__ << " logging for channel '" << channel
 	       << "' to file '" << log_file << "'" << dendl;
-      if (log_file.empty()) {
-	// do not log this channel
-	fd = -1;
-      } else {
+      if (!log_file.empty()) {
 	fd = ::open(log_file.c_str(), O_WRONLY|O_APPEND|O_CREAT|O_CLOEXEC, 0600);
 	if (fd < 0) {
 	  int err = -errno;
@@ -409,11 +418,12 @@ void LogMonitor::log_external(const LogEntry& le)
     } else {
       fd = p->second;
     }
+  }
+  if (do_stderr || fd >= 0) {
+    fmt::format_to(std::back_inserter(log_buffer), "{}\n", le);
 
     if (fd >= 0) {
-      fmt::format_to(file_log_buffer, "{}\n", le);
-      int err = safe_write(fd, file_log_buffer.data(), file_log_buffer.size());
-      file_log_buffer.clear();
+      int err = safe_write(fd, log_buffer.data(), log_buffer.size());
       if (err < 0) {
 	dout(1) << "error writing to '" << channels.get_log_file(channel)
 		<< "' for channel '" << channel
@@ -422,6 +432,12 @@ void LogMonitor::log_external(const LogEntry& le)
 	channel_fds.erase(channel);
       }
     }
+
+    if (do_stderr) {
+      fmt::print(std::cerr, "{} {}", channel, std::string_view(log_buffer.data(), log_buffer.size()));
+    }
+
+    log_buffer.clear();
   }
 }
 
@@ -696,11 +712,9 @@ bool LogMonitor::preprocess_log(MonOpRequestRef op)
     goto done;
   }
 
-  return false;
-
- done:
-  mon.no_reply(op);
-  return true;
+  done:
+    mon.no_reply(op);
+    return (!num_new);
 }
 
 struct LogMonitor::C_Log : public C_MonOp {
@@ -737,7 +751,7 @@ bool LogMonitor::prepare_log(MonOpRequestRef op)
       pending_log.insert(pair<utime_t,LogEntry>(p->stamp, *p));
     }
   }
-  wait_for_finished_proposal(op, new C_Log(this, op));
+  wait_for_commit(op, new C_Log(this, op));
   return true;
 }
 
@@ -909,7 +923,7 @@ bool LogMonitor::preprocess_command(MonOpRequestRef op)
 	  } else {
 	    start = from;
 	  }
-	  dout(10) << __func__ << " channnel " << p.first
+	  dout(10) << __func__ << " channel " << p.first
 		   << " from " << from << " to " << to << dendl;
 	  for (version_t v = start; v < to; ++v) {
 	    bufferlist ebl;
@@ -930,6 +944,9 @@ bool LogMonitor::preprocess_command(MonOpRequestRef op)
 	  entries.erase(entries.begin());
 	}
 	for (auto& p : entries) {
+	  if (!match(p.second)) {
+	    continue;
+	  }
 	  if (f) {
 	    f->dump_object("entry", p.second);
 	  } else {
@@ -961,10 +978,12 @@ bool LogMonitor::preprocess_command(MonOpRequestRef op)
 	    LogEntry le;
 	    auto p = ebl.cbegin();
 	    decode(le, p);
-	    if (f) {
-	      f->dump_object("entry", le);
-	    } else {
-	      ss << le << "\n";
+	    if (match(le)) {
+	      if (f) {
+	        f->dump_object("entry", le);
+	      } else {
+	        ss << le << "\n";
+	      }
 	    }
 	  }
 	}
@@ -1028,7 +1047,7 @@ bool LogMonitor::prepare_command(MonOpRequestRef op)
     le.msg = str_join(logtext, " ");
     pending_keys.insert(le.key());
     pending_log.insert(pair<utime_t,LogEntry>(le.stamp, le));
-    wait_for_finished_proposal(op, new Monitor::C_Command(
+    wait_for_commit(op, new Monitor::C_Command(
           mon, op, 0, string(), get_last_committed() + 1));
     return true;
   }
@@ -1038,6 +1057,11 @@ bool LogMonitor::prepare_command(MonOpRequestRef op)
   return false;
 }
 
+void LogMonitor::dump_info(Formatter *f)
+{
+  f->dump_unsigned("logm_first_committed", get_first_committed());
+  f->dump_unsigned("logm_last_committed", get_last_committed());
+}
 
 int LogMonitor::sub_name_to_id(const string& n)
 {
@@ -1175,16 +1199,6 @@ void LogMonitor::update_log_channels()
   }
 
   r = get_conf_str_map_helper(
-    g_conf().get_val<string>("mon_cluster_log_to_syslog_level"),
-    oss, &channels.syslog_level,
-    CLOG_CONFIG_DEFAULT_KEY);
-  if (r < 0) {
-    derr << __func__ << " error parsing 'mon_cluster_log_to_syslog_level'"
-         << dendl;
-    return;
-  }
-
-  r = get_conf_str_map_helper(
     g_conf().get_val<string>("mon_cluster_log_to_syslog_facility"),
     oss, &channels.syslog_facility,
     CLOG_CONFIG_DEFAULT_KEY);
@@ -1204,11 +1218,11 @@ void LogMonitor::update_log_channels()
   }
 
   r = get_conf_str_map_helper(
-    g_conf().get_val<string>("mon_cluster_log_file_level"), oss,
-    &channels.log_file_level,
+    g_conf().get_val<string>("mon_cluster_log_level"), oss,
+    &channels.log_level,
     CLOG_CONFIG_DEFAULT_KEY);
   if (r < 0) {
-    derr << __func__ << " error parsing 'mon_cluster_log_file_level'"
+    derr << __func__ << " error parsing 'mon_cluster_log_level'"
          << dendl;
     return;
   }
@@ -1257,15 +1271,27 @@ void LogMonitor::update_log_channels()
   log_external_close_fds();
 }
 
+std::vector<std::string> LogMonitor::get_tracked_keys() const noexcept
+{
+  return {
+    "mon_cluster_log_to_syslog"s,
+    "mon_cluster_log_to_syslog_facility"s,
+    "mon_cluster_log_file"s,
+    "mon_cluster_log_level"s,
+    "mon_cluster_log_to_graylog"s,
+    "mon_cluster_log_to_graylog_host"s,
+    "mon_cluster_log_to_graylog_port"s,
+    "mon_cluster_log_to_journald"s,
+    "mon_cluster_log_to_file"s
+  };}
 
 void LogMonitor::handle_conf_change(const ConfigProxy& conf,
                                     const std::set<std::string> &changed)
 {
   if (changed.count("mon_cluster_log_to_syslog") ||
-      changed.count("mon_cluster_log_to_syslog_level") ||
       changed.count("mon_cluster_log_to_syslog_facility") ||
       changed.count("mon_cluster_log_file") ||
-      changed.count("mon_cluster_log_file_level") ||
+      changed.count("mon_cluster_log_level") ||
       changed.count("mon_cluster_log_to_graylog") ||
       changed.count("mon_cluster_log_to_graylog_host") ||
       changed.count("mon_cluster_log_to_graylog_port") ||

@@ -291,6 +291,12 @@ public:
   Transaction(const Transaction& other) = default;
   Transaction& operator=(const Transaction& other) = default;
 
+  Transaction claim_and_reset() {
+    auto ret = Transaction();
+    std::swap(*this, ret);
+    return ret;
+  }
+
   // expose object_index for FileStore::Op's benefit
   const std::map<ghobject_t, uint32_t>& get_object_index() const {
     return object_index;
@@ -704,10 +710,6 @@ public:
       std::string s;
       decode(s, data_bl_p);
       return s;
-    }
-    void decode_bp(ceph::buffer::ptr& bp) {
-	using ceph::decode;
-      decode(bp, data_bl_p);
     }
     void decode_bl(ceph::buffer::list& bl) {
 	using ceph::decode;
@@ -1293,8 +1295,8 @@ public:
   void dump(ceph::Formatter *f);
   static void generate_test_instances(std::list<Transaction*>& o);
 };
-WRITE_CLASS_ENCODER(Transaction)
-WRITE_CLASS_ENCODER(Transaction::TransactionData)
+WRITE_CLASS_ENCODER(ceph::os::Transaction)
+WRITE_CLASS_ENCODER(ceph::os::Transaction::TransactionData)
 
 std::ostream& operator<<(std::ostream& out, const Transaction& tx);
 

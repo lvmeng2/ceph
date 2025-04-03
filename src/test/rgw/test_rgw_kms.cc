@@ -4,9 +4,9 @@
 #include <gtest/gtest.h>
 #include <gmock/gmock.h>
 #include "common/ceph_context.h"
-#include "rgw/rgw_common.h"
+#include "rgw_common.h"
 #define FORTEST_VIRTUAL virtual
-#include "rgw/rgw_kms.cc"
+#include "rgw_kms.cc"
 
 using ::testing::_;
 using ::testing::Action;
@@ -18,18 +18,18 @@ using ::testing::StrEq;
 class MockTransitSecretEngine : public TransitSecretEngine {
 
 public:
-  MockTransitSecretEngine(CephContext *cct, EngineParmMap parms) : TransitSecretEngine(cct, parms){}
+  MockTransitSecretEngine(CephContext *cct, SSEContext & kctx, EngineParmMap parms) : TransitSecretEngine(cct, kctx, parms){}
 
-  MOCK_METHOD(int, send_request, (const DoutPrefixProvider *dpp, const char *method, std::string_view infix, std::string_view key_id, const std::string& postdata, bufferlist &bl), (override));
+  MOCK_METHOD(int, send_request, (const DoutPrefixProvider *dpp, const char *method, std::string_view infix, std::string_view key_id, const std::string& postdata, optional_yield y, bufferlist &bl), (override));
 
 };
 
 class MockKvSecretEngine : public KvSecretEngine {
 
 public:
-  MockKvSecretEngine(CephContext *cct, EngineParmMap parms) : KvSecretEngine(cct, parms){}
+  MockKvSecretEngine(CephContext *cct, SSEContext & kctx, EngineParmMap parms) : KvSecretEngine(cct, kctx, parms){}
 
-  MOCK_METHOD(int, send_request, (const DoutPrefixProvider *dpp, const char *method, std::string_view infix, std::string_view key_id, const std::string& postdata, bufferlist &bl), (override));
+  MOCK_METHOD(int, send_request, (const DoutPrefixProvider *dpp, const char *method, std::string_view infix, std::string_view key_id, const std::string& postdata, optional_yield y, bufferlist &bl), (override));
 
 };
 
@@ -44,17 +44,19 @@ protected:
   void SetUp() override {
     EngineParmMap old_parms, kv_parms, new_parms;
     cct = (new CephContext(CEPH_ENTITY_TYPE_ANY))->get();
+    KMSContext kctx { cct };
     old_parms["compat"] = "2";
-    old_engine = new MockTransitSecretEngine(cct, std::move(old_parms));
-    kv_engine = new MockKvSecretEngine(cct, std::move(kv_parms));
+    old_engine = new MockTransitSecretEngine(cct, kctx, std::move(old_parms));
+    kv_engine = new MockKvSecretEngine(cct, kctx, std::move(kv_parms));
     new_parms["compat"] = "1";
-    transit_engine = new MockTransitSecretEngine(cct, std::move(new_parms));
+    transit_engine = new MockTransitSecretEngine(cct, kctx, std::move(new_parms));
   }
 
   void TearDown() {
     delete old_engine;
     delete kv_engine;
     delete transit_engine;
+    delete cct;
   }
 
 };
@@ -64,15 +66,16 @@ TEST_F(TestSSEKMS, vault_token_file_unset)
 {
   cct->_conf.set_val("rgw_crypt_vault_auth", "token");
   EngineParmMap old_parms, kv_parms;
-  TransitSecretEngine te(cct, std::move(old_parms));
-  KvSecretEngine kv(cct, std::move(kv_parms));
+  KMSContext kctx { cct };
+  TransitSecretEngine te(cct, kctx, std::move(old_parms));
+  KvSecretEngine kv(cct, kctx, std::move(kv_parms));
   const NoDoutPrefix no_dpp(cct, 1);
 
   std::string_view key_id("my_key");
   std::string actual_key;
 
-  ASSERT_EQ(te.get_key(&no_dpp, key_id, actual_key), -EINVAL);
-  ASSERT_EQ(kv.get_key(&no_dpp, key_id, actual_key), -EINVAL);
+  ASSERT_EQ(te.get_key(&no_dpp, key_id, null_yield, actual_key), -EINVAL);
+  ASSERT_EQ(kv.get_key(&no_dpp, key_id, null_yield, actual_key), -EINVAL);
 }
 
 
@@ -81,21 +84,22 @@ TEST_F(TestSSEKMS, non_existent_vault_token_file)
   cct->_conf.set_val("rgw_crypt_vault_auth", "token");
   cct->_conf.set_val("rgw_crypt_vault_token_file", "/nonexistent/file");
   EngineParmMap old_parms, kv_parms;
-  TransitSecretEngine te(cct, std::move(old_parms));
-  KvSecretEngine kv(cct, std::move(kv_parms));
+  KMSContext kctx { cct };
+  TransitSecretEngine te(cct, kctx, std::move(old_parms));
+  KvSecretEngine kv(cct, kctx, std::move(kv_parms));
   const NoDoutPrefix no_dpp(cct, 1);
 
   std::string_view key_id("my_key/1");
   std::string actual_key;
 
-  ASSERT_EQ(te.get_key(&no_dpp, key_id, actual_key), -ENOENT);
-  ASSERT_EQ(kv.get_key(&no_dpp, key_id, actual_key), -ENOENT);
+  ASSERT_EQ(te.get_key(&no_dpp, key_id, null_yield, actual_key), -ENOENT);
+  ASSERT_EQ(kv.get_key(&no_dpp, key_id, null_yield, actual_key), -ENOENT);
 }
 
 
 typedef int SendRequestMethod(const DoutPrefixProvider *dpp, const char *,
   std::string_view, std::string_view,
-  const std::string &, bufferlist &);
+  const std::string &, optional_yield, bufferlist &);
 
 class SetPointedValueAction : public ActionInterface<SendRequestMethod> {
  public:
@@ -105,13 +109,14 @@ class SetPointedValueAction : public ActionInterface<SendRequestMethod> {
     this->json = json;
   }
 
-  int Perform(const ::std::tuple<const DoutPrefixProvider*, const char *, std::string_view, std::string_view, const std::string &, bufferlist &>& args) override {
+  int Perform(const ::std::tuple<const DoutPrefixProvider*, const char *, std::string_view, std::string_view, const std::string &, optional_yield, bufferlist &>& args) override {
 //    const DoutPrefixProvider *dpp = ::std::get<0>(args);
 //    const char *method = ::std::get<1>(args);
 //    std::string_view infix = ::std::get<2>(args);
 //    std::string_view key_id = ::std::get<3>(args);
 //    const std::string& postdata = ::std::get<4>(args);
-    bufferlist& bl = ::std::get<5>(args);
+//    optional_yield y = ::std::get<5>(args);
+    bufferlist& bl = ::std::get<6>(args);
 
 // std::cout << "method = " << method << " infix = " << infix << " key_id = " << key_id
 // << " postdata = " << postdata
@@ -134,7 +139,7 @@ Action<SendRequestMethod> SetPointedValue(std::string json) {
 TEST_F(TestSSEKMS, test_transit_key_version_extraction){
   const NoDoutPrefix no_dpp(cct, 1);
   string json = R"({"data": {"keys": {"6": "8qgPWvdtf6zrriS5+nkOzDJ14IGVR6Bgkub5dJn6qeg="}}})";
-  EXPECT_CALL(*old_engine, send_request(&no_dpp, StrEq("GET"), StrEq(""), StrEq("1/2/3/4/5/6"), StrEq(""), _)).WillOnce(SetPointedValue(json));
+  EXPECT_CALL(*old_engine, send_request(&no_dpp, StrEq("GET"), StrEq(""), StrEq("1/2/3/4/5/6"), StrEq(""), _, _)).WillOnce(SetPointedValue(json));
 
   std::string actual_key;
   std::string tests[11] {"/", "my_key/", "my_key", "", "my_key/a", "my_key/1a",
@@ -143,11 +148,11 @@ TEST_F(TestSSEKMS, test_transit_key_version_extraction){
 
   int res;
   for (const auto &test: tests) {
-    res = old_engine->get_key(&no_dpp, std::string_view(test), actual_key);
+    res = old_engine->get_key(&no_dpp, std::string_view(test), null_yield, actual_key);
     ASSERT_EQ(res, -EINVAL);
   }
 
-  res = old_engine->get_key(&no_dpp, std::string_view("1/2/3/4/5/6"), actual_key);
+  res = old_engine->get_key(&no_dpp, std::string_view("1/2/3/4/5/6"), null_yield, actual_key);
   ASSERT_EQ(res, 0);
   ASSERT_EQ(actual_key, from_base64("8qgPWvdtf6zrriS5+nkOzDJ14IGVR6Bgkub5dJn6qeg="));
 }
@@ -161,9 +166,9 @@ TEST_F(TestSSEKMS, test_transit_backend){
   // Mocks the expected return Value from Vault Server using custom Argument Action
   string json = R"({"data": {"keys": {"1": "8qgPWvdtf6zrriS5+nkOzDJ14IGVR6Bgkub5dJn6qeg="}}})";
   const NoDoutPrefix no_dpp(cct, 1);
-  EXPECT_CALL(*old_engine, send_request(&no_dpp, StrEq("GET"), StrEq(""), StrEq("my_key/1"), StrEq(""), _)).WillOnce(SetPointedValue(json));
+  EXPECT_CALL(*old_engine, send_request(&no_dpp, StrEq("GET"), StrEq(""), StrEq("my_key/1"), StrEq(""), _, _)).WillOnce(SetPointedValue(json));
 
-  int res = old_engine->get_key(&no_dpp, my_key, actual_key);
+  int res = old_engine->get_key(&no_dpp, my_key, null_yield, actual_key);
 
   ASSERT_EQ(res, 0);
   ASSERT_EQ(actual_key, from_base64("8qgPWvdtf6zrriS5+nkOzDJ14IGVR6Bgkub5dJn6qeg="));
@@ -179,13 +184,13 @@ TEST_F(TestSSEKMS, test_transit_makekey){
 
   // Mocks the expected return Value from Vault Server using custom Argument Action
   string post_json = R"({"data": {"ciphertext": "vault:v2:HbdxLnUztGVo+RseCIaYVn/4wEUiJNT6GQfw57KXQmhXVe7i1/kgLWegEPg1I6lexhIuXAM6Q2YvY0aZ","key_version": 1,"plaintext": "3xfTra/dsIf3TMa3mAT2IxPpM7YWm/NvUb4gDfSDX4g="}})";
-  EXPECT_CALL(*transit_engine, send_request(&no_dpp, StrEq("POST"), StrEq("/datakey/plaintext/"), StrEq("my_key"), _, _))
+  EXPECT_CALL(*transit_engine, send_request(&no_dpp, StrEq("POST"), StrEq("/datakey/plaintext/"), StrEq("my_key"), _, _, _))
 		.WillOnce(SetPointedValue(post_json));
 
   set_attr(attrs, RGW_ATTR_CRYPT_CONTEXT, R"({"aws:s3:arn": "fred"})");
   set_attr(attrs, RGW_ATTR_CRYPT_KEYID, my_key);
 
-  int res = transit_engine->make_actual_key(&no_dpp, attrs, actual_key);
+  int res = transit_engine->make_actual_key(&no_dpp, attrs, null_yield, actual_key);
   std::string cipher_text { get_str_attribute(attrs,RGW_ATTR_CRYPT_DATAKEY) };
 
   ASSERT_EQ(res, 0);
@@ -203,13 +208,13 @@ TEST_F(TestSSEKMS, test_transit_reconstitutekey){
   // Mocks the expected return Value from Vault Server using custom Argument Action
   set_attr(attrs, RGW_ATTR_CRYPT_DATAKEY, "vault:v2:HbdxLnUztGVo+RseCIaYVn/4wEUiJNT6GQfw57KXQmhXVe7i1/kgLWegEPg1I6lexhIuXAM6Q2YvY0aZ");
   string post_json = R"({"data": {"key_version": 1,"plaintext": "3xfTra/dsIf3TMa3mAT2IxPpM7YWm/NvUb4gDfSDX4g="}})";
-  EXPECT_CALL(*transit_engine, send_request(&no_dpp, StrEq("POST"), StrEq("/decrypt/"), StrEq("my_key"), _, _))
+  EXPECT_CALL(*transit_engine, send_request(&no_dpp, StrEq("POST"), StrEq("/decrypt/"), StrEq("my_key"), _, _, _))
 		.WillOnce(SetPointedValue(post_json));
 
   set_attr(attrs, RGW_ATTR_CRYPT_CONTEXT, R"({"aws:s3:arn": "fred"})");
   set_attr(attrs, RGW_ATTR_CRYPT_KEYID, my_key);
 
-  int res = transit_engine->reconstitute_actual_key(&no_dpp, attrs, actual_key);
+  int res = transit_engine->reconstitute_actual_key(&no_dpp, attrs, null_yield, actual_key);
 
   ASSERT_EQ(res, 0);
   ASSERT_EQ(actual_key, from_base64("3xfTra/dsIf3TMa3mAT2IxPpM7YWm/NvUb4gDfSDX4g="));
@@ -223,10 +228,10 @@ TEST_F(TestSSEKMS, test_kv_backend){
 
   // Mocks the expected return value from Vault Server using custom Argument Action
   string json = R"({"data": {"data": {"key": "8qgPWvdtf6zrriS5+nkOzDJ14IGVR6Bgkub5dJn6qeg="}}})";
-  EXPECT_CALL(*kv_engine, send_request(&no_dpp, StrEq("GET"), StrEq(""), StrEq("my_key"), StrEq(""), _))
+  EXPECT_CALL(*kv_engine, send_request(&no_dpp, StrEq("GET"), StrEq(""), StrEq("my_key"), StrEq(""), _, _))
 		.WillOnce(SetPointedValue(json));
 
-  int res = kv_engine->get_key(&no_dpp, my_key, actual_key);
+  int res = kv_engine->get_key(&no_dpp, my_key, null_yield, actual_key);
 
   ASSERT_EQ(res, 0);
   ASSERT_EQ(actual_key, from_base64("8qgPWvdtf6zrriS5+nkOzDJ14IGVR6Bgkub5dJn6qeg="));
@@ -238,7 +243,7 @@ TEST_F(TestSSEKMS, concat_url)
   // Each test has 3 strings:
   // * the base URL
   // * the path we want to concatenate
-  // * the exepected final URL
+  // * the expected final URL
   std::string tests[9][3] ={
     {"", "", ""},
     {"", "bar", "/bar"},
@@ -282,9 +287,9 @@ TEST_F(TestSSEKMS, test_transit_backend_empty_response)
 
   // Mocks the expected return Value from Vault Server using custom Argument Action
   string json = R"({"errors": ["version does not exist or cannot be found"]})";
-  EXPECT_CALL(*old_engine, send_request(&no_dpp, StrEq("GET"), StrEq(""), StrEq("/key/nonexistent/1"), StrEq(""), _)).WillOnce(SetPointedValue(json));
+  EXPECT_CALL(*old_engine, send_request(&no_dpp, StrEq("GET"), StrEq(""), StrEq("/key/nonexistent/1"), StrEq(""), _, _)).WillOnce(SetPointedValue(json));
 
-  int res = old_engine->get_key(&no_dpp, my_key, actual_key);
+  int res = old_engine->get_key(&no_dpp, my_key, null_yield, actual_key);
 
   ASSERT_EQ(res, -EINVAL);
   ASSERT_EQ(actual_key, from_base64(""));

@@ -7,10 +7,11 @@
 #include "include/cpp-btree/btree_map.h"
 #include "include/cpp-btree/btree_set.h"
 #include "Allocator.h"
+#include "AllocatorBase.h"
 #include "os/bluestore/bluestore_types.h"
 #include "include/mempool.h"
 
-class BtreeAllocator : public Allocator {
+class BtreeAllocator : public AllocatorBase {
   struct range_seg_t {
     uint64_t start;   ///< starting offset of this segment
     uint64_t end;     ///< ending offset (non-inclusive)
@@ -83,7 +84,8 @@ public:
   double get_fragmentation() override;
 
   void dump() override;
-  void dump(std::function<void(uint64_t offset, uint64_t length)> notify) override;
+  void foreach(
+    std::function<void(uint64_t offset, uint64_t length)> notify) override;
   void init_add_free(uint64_t offset, uint64_t length) override;
   void init_rm_free(uint64_t offset, uint64_t length) override;
   void shutdown() override;
@@ -172,7 +174,9 @@ private:
 
   uint64_t _lowest_size_available() const {
     auto rs = range_size_tree.begin();
-    return rs != range_size_tree.end() ? rs->size : 0;
+    return rs != range_size_tree.end() ?
+      rs->size :
+      std::numeric_limits<uint64_t>::max();
   }
 
   int64_t _allocate(

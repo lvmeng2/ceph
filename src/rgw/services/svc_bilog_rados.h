@@ -1,4 +1,3 @@
-
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
 // vim: ts=8 sw=2 smarttab ft=cpp
 
@@ -17,12 +16,7 @@
 
 #pragma once
 
-#include "rgw/rgw_service.h"
-
-#include "svc_rados.h"
-
-
-
+#include "rgw_service.h"
 
 class RGWSI_BILog_RADOS : public RGWServiceInstance
 {
@@ -35,16 +29,16 @@ public:
 
   void init(RGWSI_BucketIndex_RADOS *bi_rados_svc);
 
-  int log_start(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info, int shard_id);
-  int log_stop(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info, int shard_id);
+  int log_start(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info, const rgw::bucket_log_layout_generation& log_layout, int shard_id);
+  int log_stop(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info, const rgw::bucket_log_layout_generation& log_layout, int shard_id);
 
-  int log_trim(const DoutPrefixProvider *dpp,
-               const RGWBucketInfo& bucket_info,
+  int log_trim(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info,
+               const rgw::bucket_log_layout_generation& log_layout,
                int shard_id,
-               std::string& start_marker,
-               std::string& end_marker);
-  int log_list(const DoutPrefixProvider *dpp,
-               const RGWBucketInfo& bucket_info,
+               std::string_view start_marker,
+               std::string_view end_marker);
+  int log_list(const DoutPrefixProvider *dpp, const RGWBucketInfo& bucket_info,
+               const rgw::bucket_log_layout_generation& log_layout,
                int shard_id,
                std::string& marker,
                uint32_t max,
@@ -53,8 +47,8 @@ public:
 
   int get_log_status(const DoutPrefixProvider *dpp,
                      const RGWBucketInfo& bucket_info,
+                     const rgw::bucket_log_layout_generation& log_layout,
                      int shard_id,
                      std::map<int, std::string> *markers,
                      optional_yield y);
 };
-

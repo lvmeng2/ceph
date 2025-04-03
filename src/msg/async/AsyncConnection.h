@@ -173,6 +173,7 @@ public:
   AsyncMessenger *async_msgr;
   uint64_t conn_id;
   PerfCounters *logger;
+  PerfCounters *labeled_logger;
   int state;
   ConnectedSocket cs;
   int port;
@@ -222,7 +223,7 @@ private:
 
   std::unique_ptr<Protocol> protocol;
 
-  std::optional<std::function<void(ssize_t)>> writeCallback;
+  std::function<void(ssize_t)> writeCallback;
   std::function<void(char *, ssize_t)> readCallback;
   std::optional<unsigned> pendingReadLen;
   char *read_buffer;
@@ -241,6 +242,8 @@ private:
   }
 
   bool is_msgr2() const override;
+
+  void dump(Formatter* f, bool tcp_info);
 
   friend class Protocol;
   friend class ProtocolV1;

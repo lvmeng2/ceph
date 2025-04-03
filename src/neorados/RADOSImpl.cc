@@ -12,14 +12,13 @@
  *
  */
 
+#include "RADOSImpl.h"
 
 #include <boost/system/system_error.hpp>
 
 #include "common/common_init.h"
 
 #include "global/global_init.h"
-
-#include "RADOSImpl.h"
 
 namespace neorados {
 namespace detail {
@@ -59,7 +58,7 @@ RADOS::RADOS(boost::asio::io_context& ioctx,
   if (err) {
     throw boost::system::system_error(ceph::to_error_code(err));
   }
-  err = monclient.authenticate(cct->_conf->client_mount_timeout);
+  err = monclient.authenticate(std::chrono::duration<double>(cct->_conf.get_val<std::chrono::seconds>("client_mount_timeout")).count());
   if (err) {
     throw boost::system::system_error(ceph::to_error_code(err));
   }

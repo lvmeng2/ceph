@@ -271,16 +271,25 @@ public:
 
 void OpenFileTable::_commit_finish(int r, uint64_t log_seq, MDSContext *fin)
 {
-  dout(10) << __func__ << " log_seq " << log_seq << dendl;
+  dout(10) << __func__ << " log_seq " << log_seq << " committed_log_seq " << committed_log_seq
+           << " committing_log_seq " << committing_log_seq << dendl;
   if (r < 0) {
     mds->handle_write_error(r);
     return;
   }
 
-  ceph_assert(log_seq <= committing_log_seq);
+  ceph_assert(log_seq == committing_log_seq);
   ceph_assert(log_seq >= committed_log_seq);
   committed_log_seq = log_seq;
   num_pending_commit--;
+
+  {
+    auto last = waiting_for_commit.upper_bound(log_seq);
+    for (auto it = waiting_for_commit.begin(); it != last; it++) {
+      finish_contexts(g_ceph_context, it->second);
+    }
+    waiting_for_commit.erase(waiting_for_commit.begin(), last);
+  }
 
   if (fin)
     fin->complete(r);
@@ -336,7 +345,8 @@ void OpenFileTable::_journal_finish(int r, uint64_t log_seq, MDSContext *c,
 
 void OpenFileTable::commit(MDSContext *c, uint64_t log_seq, int op_prio)
 {
-  dout(10) << __func__ << " log_seq " << log_seq << dendl;
+  dout(10) << __func__ << " log_seq " << log_seq << " committing_log_seq:"
+          << committing_log_seq << dendl;
 
   ceph_assert(num_pending_commit == 0);
   num_pending_commit++;
@@ -748,7 +758,7 @@ void OpenFileTable::_load_finish(int op_r, int header_r, int values_r,
 				 std::map<std::string, bufferlist> &values)
 {
   using ceph::decode;
-  int err = -CEPHFS_EINVAL;
+  int err = -EINVAL;
 
   auto decode_func = [this](unsigned idx, inodeno_t ino, bufferlist &bl) {
     auto p = bl.cbegin();
@@ -1059,6 +1069,12 @@ void OpenFileTable::_prefetch_dirfrags()
     CInode *diri = mdcache->get_inode(ino);
     if (!diri)
       continue;
+
+    if (!diri->is_dir()) {
+      dout(10) << " " << *diri << " is not dir" << dendl;
+      continue;
+    }
+
     if (diri->state_test(CInode::STATE_REJOINUNDEF))
       continue;
 
@@ -1090,7 +1106,7 @@ void OpenFileTable::_prefetch_dirfrags()
       ceph_assert(dir->get_inode()->dirfragtree.is_leaf(dir->get_frag()));
     dir->fetch(gather.new_sub());
 
-    if (!(++num_opening_dirfrags % 1000))
+    if (!(++num_opening_dirfrags % mds->heartbeat_reset_grace()))
       mds->heartbeat_reset();
   }
 
@@ -1166,7 +1182,7 @@ void OpenFileTable::_prefetch_inodes()
       mdcache->open_ino(ino, pool, fin, false);
     }
 
-    if (!(num_opening_inodes % 1000))
+    if (!(num_opening_inodes % mds->heartbeat_reset_grace()))
       mds->heartbeat_reset();
   }
 

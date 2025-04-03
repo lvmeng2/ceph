@@ -4,13 +4,13 @@ import { Router } from '@angular/router';
 import { NgbModalRef } from '@ng-bootstrap/ng-bootstrap';
 import _ from 'lodash';
 import { Subscription } from 'rxjs';
-import { map, mergeMap } from 'rxjs/operators';
+import { mergeMap } from 'rxjs/operators';
 
 import { HostService } from '~/app/shared/api/host.service';
 import { OrchestratorService } from '~/app/shared/api/orchestrator.service';
 import { ListWithDetails } from '~/app/shared/classes/list-with-details.class';
 import { ConfirmationModalComponent } from '~/app/shared/components/confirmation-modal/confirmation-modal.component';
-import { CriticalConfirmationModalComponent } from '~/app/shared/components/critical-confirmation-modal/critical-confirmation-modal.component';
+import { DeleteConfirmationModalComponent } from '~/app/shared/components/delete-confirmation-modal/delete-confirmation-modal.component';
 import { FormModalComponent } from '~/app/shared/components/form-modal/form-modal.component';
 import { SelectMessages } from '~/app/shared/components/select/select-messages.model';
 import { ActionLabelsI18n, URLVerbs } from '~/app/shared/constants/app.constants';
@@ -26,13 +26,15 @@ import { FinishedTask } from '~/app/shared/models/finished-task';
 import { OrchestratorFeature } from '~/app/shared/models/orchestrator.enum';
 import { OrchestratorStatus } from '~/app/shared/models/orchestrator.interface';
 import { Permissions } from '~/app/shared/models/permissions';
-import { DimlessBinaryPipe } from '~/app/shared/pipes/dimless-binary.pipe';
+import { EmptyPipe } from '~/app/shared/pipes/empty.pipe';
 import { AuthStorageService } from '~/app/shared/services/auth-storage.service';
-import { ModalService } from '~/app/shared/services/modal.service';
+import { CdTableServerSideService } from '~/app/shared/services/cd-table-server-side.service';
 import { NotificationService } from '~/app/shared/services/notification.service';
 import { TaskWrapperService } from '~/app/shared/services/task-wrapper.service';
 import { URLBuilderService } from '~/app/shared/services/url-builder.service';
 import { HostFormComponent } from './host-form/host-form.component';
+import { ModalCdsService } from '~/app/shared/services/modal-cds.service';
+import { DeletionImpact } from '~/app/shared/enum/delete-confirmation-modal-impact.enum';
 
 const BASE_URL = 'hosts';
 
@@ -49,21 +51,24 @@ export class HostsComponent extends ListWithDetails implements OnDestroy, OnInit
   table: TableComponent;
   @ViewChild('servicesTpl', { static: true })
   public servicesTpl: TemplateRef<any>;
+  @ViewChild('hostMetricTmpl', { static: true })
+  public hostMetricTmpl: TemplateRef<any>;
+  @ViewChild('hostDimlessTmpl', { static: true })
+  public hostDimlessTmpl: TemplateRef<any>;
   @ViewChild('maintenanceConfirmTpl', { static: true })
   maintenanceConfirmTpl: TemplateRef<any>;
   @ViewChild('orchTmpl', { static: true })
   orchTmpl: TemplateRef<any>;
   @ViewChild('flashTmpl', { static: true })
   flashTmpl: TemplateRef<any>;
+  @ViewChild('hostNameTpl', { static: true })
+  hostNameTpl: TemplateRef<any>;
 
   @Input()
   hiddenColumns: string[] = [];
 
   @Input()
-  hideTitle = false;
-
-  @Input()
-  hideSubmitBtn = false;
+  hideMaintenance = false;
 
   @Input()
   hasTableDetails = true;
@@ -74,12 +79,19 @@ export class HostsComponent extends ListWithDetails implements OnDestroy, OnInit
   @Input()
   showGeneralActionsOnly = false;
 
+  @Input()
+  showExpandClusterBtn = true;
+
+  @Input()
+  showInlineActions = true;
+
   permissions: Permissions;
   columns: Array<CdTableColumn> = [];
   hosts: Array<object> = [];
   isLoadingHosts = false;
   cdParams = { fromLink: '/hosts' };
   tableActions: CdTableAction[];
+  expandClusterActions: CdTableAction[];
   selection = new CdTableSelection();
   modalRef: NgbModalRef;
   isExecuting = false;
@@ -89,6 +101,8 @@ export class HostsComponent extends ListWithDetails implements OnDestroy, OnInit
   bsModalRef: NgbModalRef;
 
   icons = Icons;
+  private tableContext: CdTableFetchDataContext = null;
+  count = 5;
 
   messages = {
     nonOrchHost: $localize`The feature is disabled because the selected host is not managed by Orchestrator.`
@@ -108,17 +122,28 @@ export class HostsComponent extends ListWithDetails implements OnDestroy, OnInit
 
   constructor(
     private authStorageService: AuthStorageService,
-    private dimlessBinary: DimlessBinaryPipe,
+    private emptyPipe: EmptyPipe,
     private hostService: HostService,
     private actionLabels: ActionLabelsI18n,
-    private modalService: ModalService,
     private taskWrapper: TaskWrapperService,
     private router: Router,
     private notificationService: NotificationService,
-    private orchService: OrchestratorService
+    private orchService: OrchestratorService,
+    private cdsModalService: ModalCdsService
   ) {
     super();
     this.permissions = this.authStorageService.getPermissions();
+    this.expandClusterActions = [
+      {
+        name: this.actionLabels.EXPAND_CLUSTER,
+        permission: 'create',
+        buttonKind: 'secondary',
+        icon: Icons.expand,
+        routerLink: '/expand-cluster',
+        disable: (selection: CdTableSelection) => this.getDisable('add', selection),
+        visible: () => this.showExpandClusterBtn
+      }
+    ];
     this.tableActions = [
       {
         name: this.actionLabels.ADD,
@@ -127,7 +152,9 @@ export class HostsComponent extends ListWithDetails implements OnDestroy, OnInit
         click: () =>
           this.router.url.includes('/hosts')
             ? this.router.navigate([BASE_URL, { outlets: { modal: [URLVerbs.ADD] } }])
-            : (this.bsModalRef = this.modalService.show(HostFormComponent)),
+            : (this.bsModalRef = this.cdsModalService.show(HostFormComponent, {
+                hideMaintenance: this.hideMaintenance
+              })),
         disable: (selection: CdTableSelection) => this.getDisable('add', selection)
       },
       {
@@ -192,12 +219,13 @@ export class HostsComponent extends ListWithDetails implements OnDestroy, OnInit
       {
         name: $localize`Hostname`,
         prop: 'hostname',
-        flexGrow: 1
+        flexGrow: 1,
+        cellTemplate: this.hostNameTpl
       },
       {
-        name: $localize`Services`,
-        prop: 'services',
-        flexGrow: 2,
+        name: $localize`Service Instances`,
+        prop: 'service_instances',
+        flexGrow: 1.5,
         cellTemplate: this.servicesTpl
       },
       {
@@ -212,11 +240,12 @@ export class HostsComponent extends ListWithDetails implements OnDestroy, OnInit
       {
         name: $localize`Status`,
         prop: 'status',
-        flexGrow: 1,
+        flexGrow: 0.8,
         cellTransformation: CellTemplate.badge,
         customTemplateConfig: {
           map: {
-            maintenance: { class: 'badge-warning' }
+            maintenance: { class: 'badge-warning' },
+            available: { class: 'badge-success' }
           }
         }
       },
@@ -228,39 +257,44 @@ export class HostsComponent extends ListWithDetails implements OnDestroy, OnInit
       {
         name: $localize`CPUs`,
         prop: 'cpu_count',
+        cellTemplate: this.hostMetricTmpl,
         flexGrow: 0.3
       },
       {
         name: $localize`Cores`,
         prop: 'cpu_cores',
+        cellTemplate: this.hostMetricTmpl,
         flexGrow: 0.3
       },
       {
         name: $localize`Total Memory`,
         prop: 'memory_total_bytes',
-        pipe: this.dimlessBinary,
+        cellTemplate: this.hostDimlessTmpl,
         flexGrow: 0.4
       },
       {
         name: $localize`Raw Capacity`,
         prop: 'raw_capacity',
-        pipe: this.dimlessBinary,
+        cellTemplate: this.hostDimlessTmpl,
         flexGrow: 0.5
       },
       {
         name: $localize`HDDs`,
         prop: 'hdd_count',
+        cellTemplate: this.hostMetricTmpl,
         flexGrow: 0.3
       },
       {
         name: $localize`Flash`,
         prop: 'flash_count',
         headerTemplate: this.flashTmpl,
+        cellTemplate: this.hostMetricTmpl,
         flexGrow: 0.3
       },
       {
         name: $localize`NICs`,
         prop: 'nic_count',
+        cellTemplate: this.hostMetricTmpl,
         flexGrow: 0.3
       }
     ];
@@ -294,9 +328,9 @@ export class HostsComponent extends ListWithDetails implements OnDestroy, OnInit
       const host = this.selection.first();
       const labels = new Set(resp.concat(this.hostService.predefinedLabels));
       const allLabels = Array.from(labels).map((label) => {
-        return { enabled: true, name: label };
+        return { content: label, selected: host['labels'].includes(label) };
       });
-      this.modalService.show(FormModalComponent, {
+      this.cdsModalService.show(FormModalComponent, {
         titleText: $localize`Edit Host: ${host.hostname}`,
         fields: [
           {
@@ -361,14 +395,12 @@ export class HostsComponent extends ListWithDetails implements OnDestroy, OnInit
               showSubmit: true,
               onSubmit: () => {
                 this.hostService.update(host['hostname'], false, [], true, true).subscribe(
-                  () => {
-                    this.modalRef.close();
-                  },
-                  () => this.modalRef.close()
+                  () => this.cdsModalService.dismissAll(),
+                  () => this.cdsModalService.dismissAll()
                 );
               }
             };
-            this.modalRef = this.modalService.show(ConfirmationModalComponent, modalVariables);
+            this.modalRef = this.cdsModalService.show(ConfirmationModalComponent, modalVariables);
           } else {
             this.notificationService.show(
               NotificationType.error,
@@ -438,7 +470,8 @@ export class HostsComponent extends ListWithDetails implements OnDestroy, OnInit
 
   deleteAction() {
     const hostname = this.selection.first().hostname;
-    this.modalRef = this.modalService.show(CriticalConfirmationModalComponent, {
+    this.modalRef = this.cdsModalService.show(DeleteConfirmationModalComponent, {
+      impact: DeletionImpact.high,
       itemDescription: 'Host',
       itemNames: [hostname],
       actionDescription: 'remove',
@@ -464,31 +497,29 @@ export class HostsComponent extends ListWithDetails implements OnDestroy, OnInit
   transformHostsData() {
     if (this.checkHostsFactsAvailable()) {
       _.forEach(this.hosts, (hostKey) => {
-        hostKey['memory_total_bytes'] = hostKey['memory_total_kb'] * 1024;
-        hostKey['raw_capacity'] = hostKey['hdd_capacity_bytes'] + hostKey['flash_capacity_bytes'];
+        hostKey['memory_total_bytes'] = this.emptyPipe.transform(hostKey['memory_total_kb'] * 1024);
+        hostKey['raw_capacity'] = this.emptyPipe.transform(
+          hostKey['hdd_capacity_bytes'] + hostKey['flash_capacity_bytes']
+        );
       });
     } else {
       // mark host facts columns unavailable
       for (let column = 4; column < this.columns.length; column++) {
-        this.columns[column]['prop'] = '';
         this.columns[column]['cellTemplate'] = this.orchTmpl;
       }
     }
   }
 
   getHosts(context: CdTableFetchDataContext) {
+    if (context !== null) {
+      this.tableContext = context;
+    }
+    if (this.tableContext == null) {
+      this.tableContext = new CdTableFetchDataContext(() => undefined);
+    }
     if (this.isLoadingHosts) {
       return;
     }
-    const typeToPermissionKey = {
-      mds: 'cephfs',
-      mon: 'monitor',
-      osd: 'osd',
-      rgw: 'rgw',
-      'rbd-mirror': 'rbdMirroring',
-      mgr: 'manager',
-      'tcmu-runner': 'iscsi'
-    };
     this.isLoadingHosts = true;
     this.sub = this.orchService
       .status()
@@ -496,30 +527,40 @@ export class HostsComponent extends ListWithDetails implements OnDestroy, OnInit
         mergeMap((orchStatus) => {
           this.orchStatus = orchStatus;
           const factsAvailable = this.checkHostsFactsAvailable();
-          return this.hostService.list(`${factsAvailable}`);
-        }),
-        map((hostList: object[]) =>
-          hostList.map((host) => {
-            host['services'].map((service: any) => {
-              service.cdLink = `/perf_counters/${service.type}/${encodeURIComponent(service.id)}`;
-              const permission = this.permissions[typeToPermissionKey[service.type]];
-              service.canRead = permission ? permission.read : false;
-              return service;
-            });
-            return host;
-          })
-        )
+          return this.hostService.list(this.tableContext?.toParams(), factsAvailable.toString());
+        })
       )
       .subscribe(
-        (hostList) => {
+        (hostList: any[]) => {
           this.hosts = hostList;
+          this.hosts.forEach((host: object) => {
+            if (host['status'] === '') {
+              host['status'] = 'available';
+            }
+          });
           this.transformHostsData();
           this.isLoadingHosts = false;
+          if (this.hosts.length > 0) {
+            this.count = CdTableServerSideService.getCount(hostList[0]);
+          } else {
+            this.count = 0;
+          }
         },
         () => {
           this.isLoadingHosts = false;
           context.error();
         }
       );
+  }
+
+  validValue(value: any) {
+    // Check if value is a number(int or float) and that it isn't null
+    return (
+      Number(value) == value &&
+      value % 1 == 0 &&
+      value !== undefined &&
+      value !== null &&
+      value !== ''
+    );
   }
 }

@@ -2,9 +2,16 @@
 // vim: ts=8 sw=2 smarttab
 
 #include "mdstypes.h"
+#include "include/cephfs/types.h"
 #include "MDSContext.h"
+#include "common/ceph_json.h"
 #include "common/Formatter.h"
 #include "common/StackStringStream.h"
+
+#include <iomanip>
+#include <iostream>
+#include <sstream>
+#include <string>
 
 const mds_gid_t MDS_GID_NONE = mds_gid_t(0);
 
@@ -283,6 +290,21 @@ void inline_data_t::decode(bufferlist::const_iterator &p)
     free_data();
 }
 
+void inline_data_t::dump(Formatter *f) const
+{
+  f->dump_unsigned("version", version);
+  f->dump_unsigned("length", length());
+}
+
+void inline_data_t::generate_test_instances(std::list<inline_data_t*>& ls)
+{
+  ls.push_back(new inline_data_t);
+  ls.push_back(new inline_data_t);
+  bufferlist bl;
+  bl.append("inline data");
+  ls.back()->set_data(bl);
+}
+
 
 /*
  * fnode_t
@@ -428,7 +450,7 @@ feature_bitset_t::feature_bitset_t(unsigned long value)
   }
 }
 
-feature_bitset_t::feature_bitset_t(const vector<size_t>& array)
+void feature_bitset_t::init_array(const vector<size_t>& array)
 {
   if (!array.empty()) {
     size_t n = array.back();
@@ -445,6 +467,26 @@ feature_bitset_t::feature_bitset_t(const vector<size_t>& array)
       _vec[bit / bits_per_block] |= (block_type)1 << (bit % bits_per_block);
     }
   }
+}
+
+feature_bitset_t::feature_bitset_t(std::string_view str)
+{
+  std::stringstream ss;
+  std::vector<size_t> v;
+  std::string atom;
+
+  ss << str;
+  while (std::getline(ss, atom, ',')) {
+    v.push_back(std::stoul(atom));
+  }
+  std::sort(v.begin(), v.end());
+
+  init_array(v);
+}
+
+feature_bitset_t::feature_bitset_t(const vector<size_t>& array)
+{
+  init_array(array);
 }
 
 feature_bitset_t& feature_bitset_t::operator-=(const feature_bitset_t& other)
@@ -488,13 +530,27 @@ void feature_bitset_t::dump(Formatter *f) const {
   f->dump_string("feature_bits", css->strv());
 }
 
+void feature_bitset_t::generate_test_instances(std::list<feature_bitset_t*>& ls)
+{
+  ls.push_back(new feature_bitset_t());
+  ls.push_back(new feature_bitset_t());
+  ls.back()->_vec.push_back(1);
+  ls.back()->_vec.push_back(2);
+  ls.back()->_vec.push_back(3);
+}
+
 void feature_bitset_t::print(ostream& out) const
 {
   std::ios_base::fmtflags f(out.flags());
-  out << "0x";
-  for (int i = _vec.size() - 1; i >= 0; --i)
-    out << std::setfill('0') << std::setw(sizeof(block_type) * 2)
-        << std::hex << _vec[i];
+  int size = _vec.size();
+  if (!size) {
+    out << "0x0";
+  } else {
+    out << "0x";
+    for (int i = size - 1; i >= 0; --i)
+      out << std::setfill('0') << std::setw(sizeof(block_type) * 2)
+          << std::hex << _vec[i];
+  }
   out.flags(f);
 }
 
@@ -517,6 +573,13 @@ void metric_spec_t::decode(bufferlist::const_iterator &p) {
 
 void metric_spec_t::dump(Formatter *f) const {
   f->dump_object("metric_flags", metric_flags);
+}
+
+void metric_spec_t::generate_test_instances(std::list<metric_spec_t*>& ls)
+{
+  ls.push_back(new metric_spec_t());
+  ls.push_back(new metric_spec_t());
+  ls.back()->metric_flags = 1;
 }
 
 void metric_spec_t::print(ostream& out) const
@@ -554,6 +617,16 @@ void client_metadata_t::dump(Formatter *f) const
   f->dump_object("metric_spec", metric_spec);
   for (const auto& [name, val] : kv_map)
     f->dump_string(name.c_str(), val);
+}
+
+void client_metadata_t::generate_test_instances(std::list<client_metadata_t*>& ls)
+{
+  ls.push_back(new client_metadata_t());
+  ls.push_back(new client_metadata_t());
+  ls.back()->kv_map["key1"] = "val1";
+  ls.back()->kv_map["key2"] = "val2";
+  ls.back()->features = 0x12345678;
+  ls.back()->metric_spec.metric_flags = 0x12345678;
 }
 
 /*
@@ -765,6 +838,10 @@ void mds_table_pending_t::generate_test_instances(std::list<mds_table_pending_t*
   ls.back()->tid = 35434;
 }
 
+void metareqid_t::dump(ceph::Formatter* f) const {
+  f->dump_object("entity", name);
+  f->dump_unsigned("tid", tid);
+}
 
 /*
  * inode_load_vec_t
@@ -966,4 +1043,50 @@ void snaprealm_reconnect_t::generate_test_instances(std::list<snaprealm_reconnec
   ls.back()->realm.ino = 0x10000000001ULL;
   ls.back()->realm.seq = 2;
   ls.back()->realm.parent = 1;
+}
+
+void EstimatedReplayTime::print(std::ostream& out) {
+  out << "replay: " << percent_complete << "% complete - elapsed time: "
+      << elapsed_time << ", estimated time remaining: " << estimated_time;
+}
+
+/*
+ * file block diffs
+ */
+void BlockDiff::encode(bufferlist& bl) const {
+  using ceph::encode;
+  ENCODE_START(1, 1, bl);
+  encode(rval, bl);
+  encode(scan_idx, bl);
+  encode(blocks, bl);
+  ENCODE_FINISH(bl);
+}
+
+void BlockDiff::decode(bufferlist::const_iterator &p) {
+  using ceph::decode;
+  DECODE_START(1, p);
+  decode(rval, p);
+  decode(scan_idx, p);
+  decode(blocks, p);
+  DECODE_FINISH(p);
+}
+
+void BlockDiff::dump(Formatter *f) const {
+  f->dump_int("rval", rval);
+  f->dump_unsigned("scan_idx", scan_idx);
+  f->dump_stream("blocks") << blocks;
+}
+
+void BlockDiff::generate_test_instances(std::list<BlockDiff*>& ls)
+{
+  ls.push_back(new BlockDiff());
+  ls.push_back(new BlockDiff());
+  ls.back()->rval = 0;
+  ls.back()->scan_idx = 1;
+  ls.back()->blocks.union_insert(0, 200);
+}
+
+void BlockDiff::print(ostream& out) const
+{
+  out << "{rval: " << rval << ", scan_idx=" << scan_idx << ", blocks=" << blocks << "}";
 }

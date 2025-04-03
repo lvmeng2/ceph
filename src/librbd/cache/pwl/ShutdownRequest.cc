@@ -13,6 +13,8 @@
 #include "librbd/cache/pwl/AbstractWriteLog.h"
 #include "librbd/plugin/Api.h"
 
+#include <shared_mutex> // for std::shared_lock
+
 #define dout_subsys ceph_subsys_rbd_pwl
 #undef dout_prefix
 #define dout_prefix *_dout << "librbd::cache::pwl:ShutdownRequest: " \
@@ -132,7 +134,7 @@ void ShutdownRequest<I>::send_remove_image_cache_state() {
   Context *ctx = create_context_callback<klass, &klass::handle_remove_image_cache_state>(
     this);
   std::shared_lock owner_lock{m_image_ctx.owner_lock};
-  m_plugin_api.execute_image_metadata_remove(&m_image_ctx, IMAGE_CACHE_STATE, ctx);
+  m_plugin_api.execute_image_metadata_remove(&m_image_ctx, PERSISTENT_CACHE_STATE, ctx);
 }
 
 template <typename I>

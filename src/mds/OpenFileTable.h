@@ -42,7 +42,6 @@ public:
 
   void commit(MDSContext *c, uint64_t log_seq, int op_prio);
   uint64_t get_committed_log_seq() const { return committed_log_seq; }
-  uint64_t get_committing_log_seq() const { return committing_log_seq; }
   bool is_any_committing() const { return num_pending_commit > 0; }
 
   void load(MDSContext *c);
@@ -50,6 +49,9 @@ public:
   void wait_for_load(MDSContext *c) {
     ceph_assert(!load_done);
     waiting_for_load.push_back(c);
+  }
+  void wait_for_commit(uint64_t seq, Context* c) {
+    waiting_for_commit[seq].push_back(c);
   }
 
   bool prefetch_inodes();
@@ -114,7 +116,7 @@ protected:
 
   version_t omap_version = 0;
 
-  unsigned omap_num_objs = 0;
+  uint32_t omap_num_objs = 0;
   std::vector<unsigned> omap_num_items;
 
   std::map<inodeno_t, OpenedAnchor> anchor_map;
@@ -150,6 +152,8 @@ protected:
   std::set<inodeno_t> destroyed_inos_set;
 
   std::unique_ptr<PerfCounters> logger;
+
+  std::map<uint64_t, std::vector<Context*>> waiting_for_commit;
 };
 
 #endif

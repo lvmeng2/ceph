@@ -11,6 +11,14 @@
 
 #include "include/ceph_assert.h"
 
+#include <unordered_map>
+
+#ifdef WITH_SEASTAR
+#include "crimson/common/perf_counters_collection.h"
+#else
+#include "common/perf_counters_collection.h"
+#endif
+
 #define MAX_FLUSH_UNDER_LOCK 20  ///< max bh's we start writeback on
 #define BUFFER_MEMORY_WEIGHT CEPH_PAGE_SHIFT  // memory usage of BufferHead, count in (1<<n)
 				 /// while holding the lock
@@ -685,7 +693,7 @@ ObjectCacher::ObjectCacher(CephContext *cct_, string name,
     max_dirty(max_dirty), target_dirty(target_dirty),
     max_size(max_bytes), max_objects(max_objects),
     max_dirty_age(ceph::make_timespan(max_dirty_age)),
-    block_writes_upfront(block_writes_upfront),
+    cfg_block_writes_upfront(block_writes_upfront),
     trace_endpoint("ObjectCacher"),
     flush_set_callback(flush_callback),
     flush_set_callback_arg(flush_callback_arg),
@@ -1722,7 +1730,8 @@ void ObjectCacher::retry_waiting_reads()
 }
 
 int ObjectCacher::writex(OSDWrite *wr, ObjectSet *oset, Context *onfreespace,
-			 ZTracer::Trace *parent_trace)
+			 ZTracer::Trace *parent_trace,
+			 bool block_writes_upfront)
 {
   ceph_assert(ceph_mutex_is_locked(lock));
   ceph::real_time now = ceph::real_clock::now();
@@ -1813,7 +1822,8 @@ int ObjectCacher::writex(OSDWrite *wr, ObjectSet *oset, Context *onfreespace,
     }
   }
 
-  int r = _wait_for_write(wr, bytes_written, oset, &trace, onfreespace);
+  int r = _wait_for_write(wr, bytes_written, oset, &trace, onfreespace,
+                          block_writes_upfront);
   delete wr;
 
   finish_contexts(cct, wait_for_reads, 0);
@@ -1893,7 +1903,8 @@ void ObjectCacher::_maybe_wait_for_writeback(uint64_t len,
 
 // blocking wait for write.
 int ObjectCacher::_wait_for_write(OSDWrite *wr, uint64_t len, ObjectSet *oset,
-				  ZTracer::Trace *trace, Context *onfreespace)
+				  ZTracer::Trace *trace, Context *onfreespace,
+                                  bool block_writes_upfront)
 {
   ceph_assert(ceph_mutex_is_locked(lock));
   ceph_assert(trace != nullptr);
@@ -2460,12 +2471,11 @@ uint64_t ObjectCacher::release_all()
   ldout(cct, 10) << "release_all" << dendl;
   uint64_t unclean = 0;
 
-  vector<ceph::unordered_map<sobject_t, Object*> >::iterator i
-    = objects.begin();
+  auto i = objects.begin();
   while (i != objects.end()) {
-    ceph::unordered_map<sobject_t, Object*>::iterator p = i->begin();
+    auto p = i->begin();
     while (p != i->end()) {
-      ceph::unordered_map<sobject_t, Object*>::iterator n = p;
+      auto n = p;
       ++n;
 
       Object *ob = p->second;
@@ -2600,14 +2610,8 @@ void ObjectCacher::verify_stats() const
 
   loff_t clean = 0, zero = 0, dirty = 0, rx = 0, tx = 0, missing = 0,
     error = 0;
-  for (vector<ceph::unordered_map<sobject_t, Object*> >::const_iterator i
-	 = objects.begin();
-       i != objects.end();
-       ++i) {
-    for (ceph::unordered_map<sobject_t, Object*>::const_iterator p
-	   = i->begin();
-	 p != i->end();
-	 ++p) {
+  for (auto i = objects.cbegin(); i != objects.cend(); ++i) {
+    for (auto p = i->cbegin(); p != i->cend(); ++p) {
       Object *ob = p->second;
       for (map<loff_t, BufferHead*>::const_iterator q = ob->data.begin();
 	   q != ob->data.end();

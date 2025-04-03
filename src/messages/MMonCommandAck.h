@@ -17,8 +17,11 @@
 
 #include "messages/PaxosServiceMessage.h"
 
-using TOPNSPC::common::cmdmap_from_json;
-using TOPNSPC::common::cmd_getval;
+#include <sstream>
+#include <string>
+
+using ceph::common::cmdmap_from_json;
+using ceph::common::cmd_getval;
 
 class MMonCommandAck final : public PaxosServiceMessage {
 public:
@@ -27,9 +30,9 @@ public:
   std::string rs;
 
   MMonCommandAck() : PaxosServiceMessage{MSG_MON_COMMAND_ACK, 0} {}
-  MMonCommandAck(const std::vector<std::string>& c, int _r, std::string s, version_t v) :
+  MMonCommandAck(const std::vector<std::string>& c, int _r, auto&& s, version_t v) :
     PaxosServiceMessage{MSG_MON_COMMAND_ACK, v},
-    cmd(c), r(_r), rs(s) { }
+    cmd(c), r(_r), rs(std::forward<decltype(s)>(s)) { }
 private:
   ~MMonCommandAck() final {}
 

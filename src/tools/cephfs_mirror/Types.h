@@ -12,6 +12,8 @@
 #include "include/cephfs/libcephfs.h"
 #include "mds/mdstypes.h"
 
+#include <boost/variant/variant.hpp>
+
 namespace cephfs {
 namespace mirror {
 
@@ -81,6 +83,8 @@ typedef std::shared_ptr<librados::IoCtx> IoCtxRef;
 // not a shared_ptr since the type is incomplete
 typedef ceph_mount_info *MountRef;
 
+using clock = ceph::coarse_mono_clock;
+using monotime = ceph::coarse_mono_time;
 } // namespace mirror
 } // namespace cephfs
 

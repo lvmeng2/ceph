@@ -61,6 +61,7 @@ public:
     std::string key;
     snapid_t first;
     bool is_remote = false;
+    bool is_referent_remote = false;
 
     inodeno_t ino;
     unsigned char d_type;
@@ -182,10 +183,11 @@ public:
   static const uint64_t WAIT_COMPLETE     = (1<<1);  // wait for complete dir contents
   static const uint64_t WAIT_FROZEN       = (1<<2);  // auth pins removed
   static const uint64_t WAIT_CREATED	  = (1<<3);  // new dirfrag is logged
+  static const uint64_t WAIT_BITS         = 4;
 
   static const int WAIT_DNLOCK_OFFSET = 4;
 
-  static const uint64_t WAIT_ANY_MASK = (uint64_t)(-1);
+  static const uint64_t WAIT_ANY_MASK = ((1ul << WAIT_BITS) - 1);
   static const uint64_t WAIT_ATSUBTREEROOT = (WAIT_SINGLEAUTH);
 
   // -- dump flags --
@@ -247,6 +249,7 @@ public:
   void reset_fnode(fnode_const_ptr&& ptr) {
     fnode = std::move(ptr);
   }
+  void set_fresh_fnode(fnode_const_ptr&& ptr);
 
   const fnode_const_ptr& get_fnode() const {
     return fnode;
@@ -322,6 +325,11 @@ public:
    */
   bool scrub_local();
 
+  /**
+   * Go bad due to a damaged dentry (register with damagetable and go BADFRAG)
+   */
+  void go_bad_dentry(snapid_t last, std::string_view dname);
+
   const scrub_info_t *scrub_info() const {
     if (!scrub_infop)
       scrub_info_create();
@@ -373,13 +381,15 @@ public:
 			   snapid_t first=2, snapid_t last=CEPH_NOSNAP);
   CDentry* add_primary_dentry(std::string_view dname, CInode *in, mempool::mds_co::string alternate_name,
 			      snapid_t first=2, snapid_t last=CEPH_NOSNAP);
-  CDentry* add_remote_dentry(std::string_view dname, inodeno_t ino, unsigned char d_type,
-                             mempool::mds_co::string alternate_name,
+  CDentry* add_remote_dentry(std::string_view dname, CInode *ref_in, inodeno_t ino,
+                             unsigned char d_type, mempool::mds_co::string alternate_name,
 			     snapid_t first=2, snapid_t last=CEPH_NOSNAP);
   void remove_dentry( CDentry *dn );         // delete dentry
   void link_remote_inode( CDentry *dn, inodeno_t ino, unsigned char d_type);
   void link_remote_inode( CDentry *dn, CInode *in );
   void link_primary_inode( CDentry *dn, CInode *in );
+  void link_null_referent_inode(CDentry *dn, inodeno_t referent_ino, inodeno_t rino, unsigned char d_type);
+  void link_referent_inode(CDentry *dn, CInode *in, inodeno_t ino, unsigned char d_type);
   void unlink_inode(CDentry *dn, bool adjust_lru=true);
   void try_remove_unlinked_dn(CDentry *dn);
 
@@ -396,10 +406,7 @@ public:
   void split(int bits, std::vector<CDir*>* subs, MDSContext::vec& waiters, bool replay);
   void merge(const std::vector<CDir*>& subs, MDSContext::vec& waiters, bool replay);
 
-  bool should_split() const {
-    return g_conf()->mds_bal_split_size > 0 &&
-           (int)get_frag_size() > g_conf()->mds_bal_split_size;
-  }
+  bool should_split() const;
   bool should_split_fast() const;
   bool should_merge() const;
 
@@ -542,6 +549,16 @@ public:
 
   void maybe_finish_freeze();
 
+  size_t count_unfreeze_tree_waiters() {
+    size_t n = count_unfreeze_dir_waiters();
+    _walk_tree([&n](CDir *dir) {
+        n += dir->count_unfreeze_dir_waiters();
+        return true;
+      });
+    return n;
+  }
+  inline size_t count_unfreeze_dir_waiters() const { return count_waiters(WAIT_UNFREEZE); }
+
   std::pair<bool,bool> is_freezing_or_frozen_tree() const {
     if (freeze_tree_state) {
       if (freeze_tree_state->frozen)
@@ -605,8 +622,8 @@ public:
   }
   void enable_frozen_inode();
 
-  std::ostream& print_db_line_prefix(std::ostream& out) override;
-  void print(std::ostream& out) override;
+  std::ostream& print_db_line_prefix(std::ostream& out) const override;
+  void print(std::ostream& out) const override;
   void dump(ceph::Formatter *f, int flags = DUMP_DEFAULT) const;
   void dump_load(ceph::Formatter *f);
 
@@ -659,11 +676,6 @@ protected:
       const std::set<snapid_t> *snaps,
       double rand_threshold,
       bool *force_dirty);
-
-  /**
-   * Go bad due to a damaged dentry (register with damagetable and go BADFRAG)
-   */
-  void go_bad_dentry(snapid_t last, std::string_view dname);
 
   /**
    * Go bad due to a damaged header (register with damagetable and go BADFRAG)
@@ -737,8 +749,6 @@ protected:
 
   ceph::coarse_mono_time last_popularity_sample = ceph::coarse_mono_clock::zero();
 
-  load_spread_t pop_spread;
-
   elist<CInode*> pop_lru_subdirs;
 
   std::unique_ptr<bloom_filter> bloom; // XXX not part of mempool::mds_co
@@ -767,7 +777,6 @@ private:
   void link_inode_work( CDentry *dn, CInode *in );
   void unlink_inode_work( CDentry *dn );
   void remove_null_dentries();
-  void purge_stale_snap_data(const std::set<snapid_t>& snaps);
 
   void prepare_new_fragment(bool replay);
   void prepare_old_fragment(std::map<string_snap_t, MDSContext::vec >& dentry_waiters, bool replay);

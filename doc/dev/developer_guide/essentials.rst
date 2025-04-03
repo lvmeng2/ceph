@@ -7,28 +7,15 @@ to know.
 Leads
 -----
 
-The Ceph project is led by Sage Weil. In addition, each major project
-component has its own lead. The following table shows all the leads and
-their nicks on `GitHub`_:
+The Ceph project was created by Sage Weil and is led by the Ceph Leadership
+Team (CLT). Each major component of the Ceph project has its own lead. The
+`team list`_ on the Ceph community website shows all the leads and their nicks
+on `GitHub`_:
 
 .. _github: https://github.com/
+.. _team list: https://ceph.io/en/community/team
 
-========= ================ =============
-Scope     Lead             GitHub nick
-========= ================ =============
-Ceph      Sage Weil        liewegas
-RADOS     Neha Ojha        neha-ojha
-RGW       Yehuda Sadeh     yehudasa
-RGW       Matt Benjamin    mattbenjamin
-RBD       Ilya Dryomov     dis 
-CephFS    Patrick Donnelly batrick
-Dashboard Ernesto Puerta   epuertat
-MON       Joao Luis        jecluis
-Build/Ops Ken Dreyer       ktdreyer
-Docs      Zac Dover        zdover23
-========= ================ =============
-
-The Ceph-specific acronyms in the table are explained in
+Ceph-specific acronyms in the table of leads are explained in
 :doc:`/architecture`.
 
 History
@@ -89,10 +76,21 @@ click on `New issue`_.
 .. _`jump to the Ceph project`: http://tracker.ceph.com/projects/ceph
 .. _`New issue`: http://tracker.ceph.com/projects/ceph/issues/new
 
+.. _ceph-slack:
+
+Slack
+-----
+
+.. _`Ceph's Slack`: https://join.slack.com/t/ceph-storage/shared_invite/zt-32hkefbs5-f6qZDZLd5U8CYj7drBTHFw
+
 .. _mailing-list:
 
 Mailing lists
 -------------
+
+Ceph developers and users discuss the project on `Ceph-related mailing lists`_.
+
+.. _`Ceph-related mailing lists`: https://ceph.com/en/community/connect
 
 Ceph Development Mailing List
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -101,11 +99,9 @@ its interoperability with other technology, and the operations of the
 project itself.
 
 The email discussion list for Ceph development is open to all. Subscribe by
-sending a message to ``dev-request@ceph.io`` with the following line in the
-body of the message::
+completing the `sign-up form on dev.ceph.io`_.
 
-    subscribe ceph-devel
-
+.. _`sign-up form on dev.ceph.io`: https://lists.ceph.io/postorius/lists/dev.ceph.io
 
 Ceph Client Patch Review Mailing List
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -114,19 +110,10 @@ for the Linux kernel Ceph client component. Note that this list used to
 be an all-encompassing list for developers. When searching the archives, 
 remember that this list contains the generic devel-ceph archives before mid-2018.
 
-Subscribe to the list covering the Linux kernel Ceph client component by sending
-a message to ``majordomo@vger.kernel.org`` with the following line in the body
-of the message::
+Subscribe to the list covering the Linux kernel Ceph client component by using
+the `sub link for ceph-devel in vger.kernel.org`_.
 
-    subscribe ceph-devel
-
-
-Other Ceph Mailing Lists
-~~~~~~~~~~~~~~~~~~~~~~~~
-
-There are also `other Ceph-related mailing lists`_.
-
-.. _`other Ceph-related mailing lists`: https://ceph.com/irc/
+.. _`sub link for ceph-devel in vger.kernel.org`: https://subspace.kernel.org/vger.kernel.org.html
 
 .. _irc:
 
@@ -159,6 +146,10 @@ register an account. Registering gives you a unique IRC identity and allows you
 to access channels where unregistered users have been locked out for technical
 reasons.
 
+See ``the official OFTC (Open and Free Technology Community) documentation's
+registration instructions
+<https://www.oftc.net/Services/#register-your-account>`` to learn how to
+register your IRC account.
 
 Channels
 ~~~~~~~~
@@ -187,7 +178,7 @@ file `CONTRIBUTING.rst`_ in the top-level directory of the source-code
 tree. There may be some overlap between this guide and that file.
 
 .. _`CONTRIBUTING.rst`:
-  https://github.com/ceph/ceph/blob/master/CONTRIBUTING.rst
+  https://github.com/ceph/ceph/blob/main/CONTRIBUTING.rst
 
 All newcomers are encouraged to read that file carefully.
 
@@ -289,16 +280,43 @@ See :ref:`kubernetes-dev`
 Backporting
 -----------
 
-All bugfixes should be merged to the ``master`` branch before being
-backported. To flag a bugfix for backporting, make sure it has a
-`tracker issue`_ associated with it and set the ``Backport`` field to a
-comma-separated list of previous releases (e.g. "hammer,jewel") that you think
-need the backport.
-The rest (including the actual backporting) will be taken care of by the
-`Stable Releases and Backports`_ team.
+All bugfixes should be merged to the ``main`` branch before being backported.
+To flag a bugfix for backporting, make sure it has a `tracker issue`_
+associated with it and set the ``Backport`` field to a comma-separated list of
+previous releases (e.g. "hammer,jewel") that you think need the backport. You
+are responsible for the backporting of pull requests that you raise.
 
 .. _`tracker issue`: http://tracker.ceph.com/
-.. _`Stable Releases and Backports`: http://tracker.ceph.com/projects/ceph-releases/wiki
+
+Dependabot
+----------
+
+Dependabot is a GitHub bot that scans the dependencies in the repositories for
+security vulnerabilities (CVEs). If a fix is available for a discovered CVE,
+Dependabot creates a pull request to update the dependency.
+
+Dependabot also indicates the compatibility score of the upgrade. This score is
+based on the number of CI failures that occur in other GitHub repositories
+where the fix was applied. 
+
+With some configuration, Dependabot can perform non-security updates (for
+example, it can upgrade to the latest minor version or patch version).
+
+Dependabot supports `several languages and package managers
+<https://docs.github.com/en/code-security/dependabot/dependabot-version-updates/about-dependabot-version-updates#supported-repositories-and-ecosystems>`_.
+As of July 2022, the Ceph project receives alerts only from pip (based on the
+`requirements.txt` files) and npm (`package*.json`). It is possible to extend
+these alerts to git submodules, Golang, and Java. As of July 2022, there is no
+support for C++ package managers such as vcpkg, conan, C++20 modules.
+
+Many of the dependencies discovered by Dependabot will best be updated
+elsewhere than the Ceph Github repository (distribution packages, for example,
+will be a better place to update some of the dependencies). Nonetheless, the
+list of new and existing vulnerabilities generated by Dependabot will be
+useful.
+
+`Here is an example of a Dependabot pull request.
+<https://github.com/ceph/ceph/pull/46998>`_
 
 Guidance for use of cluster log
 -------------------------------
