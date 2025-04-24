@@ -5,6 +5,8 @@
 #include <fmt/ostream.h>
 #include <fmt/ranges.h>
 
+#include "crimson/common/coroutine.h"
+#include "crimson/common/log.h"
 #include "crimson/common/type_helpers.h"
 #include "crimson/osd/backfill_facades.h"
 #include "crimson/osd/osd_operations/background_recovery.h"
@@ -15,6 +17,8 @@
 
 #include "osd/osd_types.h"
 #include "osd/PeeringState.h"
+
+SET_SUBSYS(osd);
 
 namespace {
   seastar::logger& logger() {
@@ -67,6 +71,8 @@ PGRecovery::start_recovery_ops(
   if (max_to_start > 0) {
     max_to_start -= start_replica_recovery_ops(trigger, max_to_start, &started);
   }
+  using interruptor =
+    crimson::interruptible::interruptor<crimson::osd::IOInterruptCondition>;
   return interruptor::parallel_for_each(started,
 					[] (auto&& ifut) {
     return std::move(ifut);
@@ -80,8 +86,8 @@ PGRecovery::start_recovery_ops(
     ceph_assert(pg->is_recovering());
     ceph_assert(!pg->is_backfilling());
 
-    bool done = !pg->get_peering_state().needs_recovery();
-    if (done) {
+    bool do_recovery = pg->get_peering_state().needs_recovery();
+    if (!do_recovery) {
       logger().debug("start_recovery_ops: AllReplicasRecovered for pg: {}",
                      pg->get_pgid());
       using LocalPeeringEvent = crimson::osd::LocalPeeringEvent;
@@ -108,7 +114,7 @@ PGRecovery::start_recovery_ops(
       }
       pg->reset_pglog_based_recovery_op();
     }
-    return seastar::make_ready_future<bool>(!done);
+    return seastar::make_ready_future<bool>(do_recovery);
   });
 }
 
@@ -194,10 +200,10 @@ size_t PGRecovery::start_primary_recovery_ops(
 	auto it = missing.get_items().find(head);
 	assert(it != missing.get_items().end());
 	auto head_need = it->second.need;
-	out->emplace_back(recover_missing(trigger, head, head_need));
+	out->emplace_back(recover_missing(trigger, head, head_need, true));
 	++skipped;
       } else {
-	out->emplace_back(recover_missing(trigger, soid, item.need));
+	out->emplace_back(recover_missing(trigger, soid, item.need, true));
       }
       ++started;
     }
@@ -304,7 +310,9 @@ size_t PGRecovery::start_replica_recovery_ops(
 PGRecovery::interruptible_future<>
 PGRecovery::recover_missing(
   RecoveryBackend::RecoveryBlockingEvent::TriggerI& trigger,
-  const hobject_t &soid, eversion_t need)
+  const hobject_t &soid,
+  eversion_t need,
+  bool with_throttle)
 {
   logger().info("{} {} v {}", __func__, soid, need);
   auto [recovering, added] = pg->get_recovery_backend()->add_recovering(soid);
@@ -317,7 +325,9 @@ PGRecovery::recover_missing(
     } else {
       return recovering.wait_track_blocking(
 	trigger,
-	pg->get_recovery_backend()->recover_object(soid, need)
+	with_throttle
+	  ? recover_object_with_throttle(soid, need)
+	  : recover_object(soid, need)
 	.handle_exception_interruptible(
 	  [=, this, soid = std::move(soid)] (auto e) {
 	  on_failed_recover({ pg->get_pg_whoami() }, soid, need);
@@ -365,7 +375,7 @@ RecoveryBackend::interruptible_future<> PGRecovery::prep_object_replica_pushes(
     logger().info("{} {} v {}, new recovery", __func__, soid, need);
     return recovering.wait_track_blocking(
       trigger,
-      pg->get_recovery_backend()->recover_object(soid, need)
+      recover_object_with_throttle(soid, need)
       .handle_exception_interruptible(
 	[=, this, soid = std::move(soid)] (auto e) {
 	on_failed_recover({ pg->get_pg_whoami() }, soid, need);
@@ -502,16 +512,34 @@ void PGRecovery::request_primary_scan(
 {
   logger().debug("{}", __func__);
   using crimson::common::local_conf;
-  std::ignore = pg->get_recovery_backend()->scan_for_backfill(
+  std::ignore = pg->get_recovery_backend()->scan_for_backfill_primary(
     begin,
     local_conf()->osd_backfill_scan_min,
-    local_conf()->osd_backfill_scan_max
-  ).then_interruptible([this] (BackfillInterval bi) {
+    local_conf()->osd_backfill_scan_max,
+    pg->get_peering_state().get_backfill_targets()
+  ).then_interruptible([this] (PrimaryBackfillInterval bi) {
     logger().debug("request_primary_scan:{}", __func__);
     using BackfillState = crimson::osd::BackfillState;
     backfill_state->process_event(
       BackfillState::PrimaryScanned{ std::move(bi) }.intrusive_from_this());
   });
+}
+
+PGRecovery::interruptible_future<>
+PGRecovery::recover_object_with_throttle(
+  hobject_t soid,
+  eversion_t need)
+{
+  LOG_PREFIX(PGRecovery::recover_object_with_throttle);
+  DEBUGDPP("{} {}", pg->get_dpp(), soid, need);
+  auto releaser = co_await interruptor::make_interruptible(
+    pg->get_shard_services().get_throttle(
+      crimson::osd::scheduler::params_t{
+	1, 0, crimson::osd::scheduler::scheduler_class_t::background_best_effort
+      }));
+  DEBUGDPP("got throttle: {} {}", pg->get_dpp(), soid, need);
+  co_await pg->get_recovery_backend()->recover_object(soid, need);
+  co_return;
 }
 
 void PGRecovery::enqueue_push(
@@ -525,7 +553,7 @@ void PGRecovery::enqueue_push(
   if (!added)
     return;
   peering_state.prepare_backfill_for_missing(obj, v, peers);
-  std::ignore = pg->get_recovery_backend()->recover_object(obj, v).\
+  std::ignore = recover_object_with_throttle(obj, v).\
   handle_exception_interruptible([] (auto) {
     ceph_abort_msg("got exception on backfill's push");
     return seastar::make_ready_future<>();
@@ -603,21 +631,8 @@ void PGRecovery::update_peers_last_backfill(
 
 bool PGRecovery::budget_available() const
 {
-  crimson::osd::scheduler::params_t params =
-    {1, 0, crimson::osd::scheduler::scheduler_class_t::background_best_effort};
   auto &ss = pg->get_shard_services();
-  auto futopt = ss.try_acquire_throttle_now(std::move(params));
-  if (!futopt) {
-    return true;
-  }
-  std::ignore = interruptor::make_interruptible(std::move(*futopt)
-  ).then_interruptible([this] {
-    assert(!backfill_state->is_triggered());
-    using BackfillState = crimson::osd::BackfillState;
-    backfill_state->process_event(
-      BackfillState::ThrottleAcquired{}.intrusive_from_this());
-  });
-  return false;
+  return ss.throttle_available();
 }
 
 void PGRecovery::on_pg_clean()

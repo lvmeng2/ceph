@@ -635,6 +635,15 @@ otherwise fail (if the snapshot did not exist).
 
 .. note:: if the last snapshot within a snapshot retained subvolume is removed, the subvolume is also removed
 
+Fetching Path of a Snapshot of a Subvolume
+------------------------------------------
+Use a command of the following form to fetch the absolute path of a snapshot of
+a subvolume:
+
+.. prompt:: base #
+
+    ceph fs subvolume snapshot getpath <volname> <subvol_name> <snap_name> [<group_name>]
+
 Listing the Snapshots of a Subvolume
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -1614,7 +1623,8 @@ services on the Ceph cluster accessed through this plugin.
 Before resorting to a measure as drastic as this, it is a good idea to try less
 drastic measures and then assess if the file system experience has improved due
 to it. One example of such less drastic measure is to disable asynchronous
-threads launched by volumes plugins for cloning and purging trash.
+threads launched by volumes plugins for cloning and purging trash. For details
+on these see: :ref:`pause-purge-threads` and :ref:`pause-clone-threads`.
 
 
 .. _manila: https://github.com/openstack/manila

@@ -730,7 +730,8 @@ seastar::future<> PG::init(
         t.touch(coll_ref->get_cid(), pgid.make_snapmapper_oid());
       }
     },
-    ::crimson::ct_error::assert_all{"unexpected eio"}
+    ::crimson::ct_error::assert_all{fmt::format(
+      "{} {} unexpected eio", *this, __func__).c_str()}
   );
 }
 
@@ -1221,8 +1222,10 @@ PG::handle_rep_op_fut PG::handle_rep_op(Ref<MOSDRepOp> req)
   DEBUGDPP("{}", *this, *req);
 
   ceph::os::Transaction txn;
-  auto encoded_txn = req->get_data().cbegin();
-  decode(txn, encoded_txn);
+  auto encoded_txn_p = req->get_middle().cbegin();
+  auto encoded_txn_d = req->get_data().cbegin();
+  txn.decode(req->get_middle().length() != 0 ? encoded_txn_p : encoded_txn_d,
+             encoded_txn_d);
   auto p = req->logbl.cbegin();
   std::vector<pg_log_entry_t> log_entries;
   decode(log_entries, p);
@@ -1458,6 +1461,7 @@ seastar::future<> PG::stop()
   cancel_remote_recovery_reservation();
   check_readable_timer.cancel();
   renew_lease_timer.cancel();
+  backend->on_actingset_changed(false);
   return osdmap_gate.stop().then([this] {
     return wait_for_active_blocker.stop();
   }).then([this] {
@@ -1509,6 +1513,10 @@ void PG::context_registry_on_change() {
   for (auto &watcher : watchers) {
     watcher->discard_state();
   }
+}
+
+bool PG::is_missing_head_and_clones(const hobject_t &hoid) {
+  return peering_state.is_missing_any_head_or_clone_of(hoid);
 }
 
 bool PG::can_discard_op(const MOSDOp& m) const {

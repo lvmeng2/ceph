@@ -480,11 +480,10 @@ void PgScrubber::update_targets(utime_t scrub_clock_now)
 
   // the next periodic scrubs:
   m_scrub_job->adjust_shallow_schedule(
-      m_pg->info.history.last_scrub_stamp, applicable_conf, scrub_clock_now,
-      delay_ready_t::delay_ready);
+      m_pg->info.history.last_scrub_stamp, applicable_conf, scrub_clock_now);
   m_scrub_job->adjust_deep_schedule(
       m_pg->info.history.last_deep_scrub_stamp, applicable_conf,
-      scrub_clock_now, delay_ready_t::delay_ready);
+      scrub_clock_now);
 
   dout(10) << fmt::format("{}: adjusted:{}", __func__, *m_scrub_job) << dendl;
 }
@@ -499,7 +498,7 @@ void PgScrubber::schedule_scrub_with_osd()
 		  "{}: state at entry: {}", __func__, m_scrub_job->state_desc())
 	   << dendl;
   m_scrub_job->registered = true;
-  update_scrub_job(delay_ready_t::delay_ready);
+  update_scrub_job();
 }
 
 
@@ -523,7 +522,7 @@ void PgScrubber::on_primary_active_clean()
  * - in the 2nd case - we know the PG state and we know we are only called
  *   for a Primary.
  */
-void PgScrubber::update_scrub_job(Scrub::delay_ready_t delay_ready)
+void PgScrubber::update_scrub_job()
 {
   if (!is_primary() || !m_scrub_job) {
     dout(10) << fmt::format(
@@ -999,7 +998,7 @@ std::optional<uint64_t> PgScrubber::select_range()
 
 void PgScrubber::select_range_n_notify()
 {
-  get_counters_set().inc(scrbcnt_chunks_selected);
+  get_labeled_counters()->inc(scrbcnt_chunks_selected);
   auto num_chunk_objects = select_range();
   if (num_chunk_objects.has_value()) {
     // the next chunk to handle is not blocked
@@ -1010,7 +1009,7 @@ void PgScrubber::select_range_n_notify()
     // we will wait for the objects range to become available for scrubbing
     dout(10) << __func__ << ": selected chunk is busy" << dendl;
     m_osds->queue_scrub_chunk_busy(m_pg, Scrub::scrub_prio_t::low_priority);
-    get_counters_set().inc(scrbcnt_chunks_busy);
+    get_labeled_counters()->inc(scrbcnt_chunks_busy);
   }
 }
 
@@ -1042,7 +1041,7 @@ bool PgScrubber::write_blocked_by_scrub(const hobject_t& soid)
     return false;
   }
 
-  get_counters_set().inc(scrbcnt_write_blocked);
+  get_labeled_counters()->inc(scrbcnt_write_blocked);
   dout(20) << __func__ << " " << soid << " can preempt? "
 	   << preemption_data.is_preemptable() << " already preempted? "
 	   << preemption_data.was_preempted() << dendl;
@@ -1405,8 +1404,8 @@ int PgScrubber::build_scrub_map_chunk(ScrubMap& map,
 
   // scan objects
   while (!pos.done()) {
-
-    int r = m_pg->get_pgbackend()->be_scan_list(map, pos);
+    int r =
+	m_pg->get_pgbackend()->be_scan_list(get_unlabeled_counters(), map, pos);
     dout(30) << __func__ << " BE returned " << r << dendl;
     if (r == -EINPROGRESS) {
       dout(20) << __func__ << " in progress" << dendl;
@@ -2036,7 +2035,7 @@ void PgScrubber::scrub_finish()
     request_rescrubbing();
   }
   // determine the next scrub time
-  update_scrub_job(delay_ready_t::delay_ready);
+  update_scrub_job();
 
   if (m_pg->is_active() && m_pg->is_primary()) {
     m_pg->recovery_state.share_pg_info();
@@ -2525,11 +2524,22 @@ void PgScrubber::set_scrub_duration(std::chrono::milliseconds duration)
   });
 }
 
-PerfCounters& PgScrubber::get_counters_set() const
+PerfCounters* PgScrubber::get_osd_perf_counters() const
 {
-  return *m_osds->get_scrub_services().get_perf_counters(
+  return m_osds->logger;
+}
+
+const Scrub::ScrubCounterSet& PgScrubber::get_unlabeled_counters() const
+{
+  return m_pg->pool.info.is_replicated() ? io_counters_replicated
+					 : io_counters_ec;
+}
+
+PerfCounters* PgScrubber::get_labeled_counters() const
+{
+  return m_osds->get_scrub_services().get_perf_counters(
       (m_pg->pool.info.is_replicated() ? pg_pool_t::TYPE_REPLICATED
-				       : pg_pool_t::TYPE_ERASURE),
+                                       : pg_pool_t::TYPE_ERASURE),
       (m_is_deep ? scrub_level_t::deep : scrub_level_t::shallow));
 }
 

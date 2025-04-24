@@ -1,5 +1,7 @@
 >=20.0.0
 
+* RADOS: leader monitor and stretch mode status are now included in the `ceph status` output.
+  Related Tracker: https://tracker.ceph.com/issues/70406
 * RGW: The User Account feature introduced in Squid provides first-class support for
   IAM APIs and policy. Our preliminary STS support was instead based on tenants, and
   exposed some IAM APIs to admins only. This tenant-level IAM functionality is now
@@ -105,6 +107,10 @@
   `PutBucketPolicy`. Additionally, the root user will always have access to modify
   the bucket policy, even if the current policy explicitly denies access.
 
+* CephFS: The ``ceph fs subvolume snapshot getpath`` command now allows users
+  to get the path of a snapshot of a subvolume. If the snapshot is not present
+  ``ENOENT`` is returned.
+
 * CephFS: The ``ceph fs volume create`` command now allows users to pass
   metadata and data pool names to be used for creating the volume. If either
   is not passed or if either is a non-empty pool, the command will abort.
@@ -124,6 +130,9 @@
   ISA-L is recommended for new pools because the Jerasure library is
   no longer maintained.
 
+* RGW: Added support for the `RestrictPublicBuckets` property of the S3 `PublicAccessBlock`
+  configuration.
+
 >=19.2.1
 
 * CephFS: Command `fs subvolume create` now allows tagging subvolumes through option
@@ -134,6 +143,9 @@
   `ceph fs subvolume earmark rm` have been added to set, get and remove earmark from a given subvolume.
 * RADOS: Add ``messenger dump`` command to retrieve runtime information
   on connections, sockets, and kernel TCP stats from the messenger.
+* RGW: deleted buckets are automatically cleaned up as part of trimming process.
+  DeleteBucket will start returning 409 BucketNotEmpty errors until empty
+  on all zones when sync policy is enabled.
 
 * RADOS: A performance botteneck in the balancer mgr module has been fixed.
   Related Tracker: https://tracker.ceph.com/issues/68657

@@ -391,7 +391,7 @@ set_target_properties(Boost::MPL PROPERTIES
   INTERFACE_COMPILE_DEFINITIONS
     "BOOST_MPL_CFG_NO_PREPROCESSED_HEADERS;BOOST_MPL_LIMIT_LIST_SIZE=30")
 
-if(WITH_SEASTAR)
+if(WITH_CRIMSON)
   find_package(c-ares 1.13.0 QUIET)
   if(NOT c-ares_FOUND)
     message(STATUS "Could not find c-ares, will build it")
@@ -777,9 +777,8 @@ if(WITH_TESTS)
       $<TARGET_PROPERTY:gtest,INTERFACE_INCLUDE_DIRECTORIES>)
     if(NOT COMPILER_IGNORES_DEPRECATED_DECL_IN_SYSTEM_HEADERS)
       # See https://github.com/llvm/llvm-project/issues/76515
-      set_property(DIRECTORY googletest
-        APPEND
-        PROPERTY COMPILE_OPTIONS "-Wno-deprecated-declarations")
+      target_compile_options(gtest
+        PRIVATE "-Wno-deprecated-declarations")
     endif()
     add_library(GTest::GTest ALIAS gtest)
     add_library(GTest::Main ALIAS gtest_main)
