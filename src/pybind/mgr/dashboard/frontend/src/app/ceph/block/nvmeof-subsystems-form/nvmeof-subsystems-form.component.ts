@@ -1,125 +1,166 @@
-import { Component, OnInit } from '@angular/core';
-import { UntypedFormControl, Validators } from '@angular/forms';
+import { Component, DestroyRef, OnInit, SecurityContext, ViewChild } from '@angular/core';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { NgbActiveModal } from '@ng-bootstrap/ng-bootstrap';
 
-import { ActionLabelsI18n, URLVerbs } from '~/app/shared/constants/app.constants';
+import { ActionLabelsI18n } from '~/app/shared/constants/app.constants';
 import { CdFormGroup } from '~/app/shared/forms/cd-form-group';
-import { CdValidators } from '~/app/shared/forms/cd-validators';
-import { Permission } from '~/app/shared/models/permissions';
-import { AuthStorageService } from '~/app/shared/services/auth-storage.service';
-import { TaskWrapperService } from '~/app/shared/services/task-wrapper.service';
-import { FinishedTask } from '~/app/shared/models/finished-task';
 import { ActivatedRoute, Router } from '@angular/router';
-import { MAX_NAMESPACE, NvmeofService } from '~/app/shared/api/nvmeof.service';
+import { Step } from 'carbon-components-angular';
+import { InitiatorRequest, NvmeofService } from '~/app/shared/api/nvmeof.service';
+import { TearsheetComponent } from '~/app/shared/components/tearsheet/tearsheet.component';
+import { HOST_TYPE } from '~/app/shared/models/nvmeof';
+import { from, Observable, of } from 'rxjs';
+import { NotificationService } from '~/app/shared/services/notification.service';
+import { NotificationType } from '~/app/shared/enum/notification-type.enum';
+import { catchError, concatMap, map, tap } from 'rxjs/operators';
+import { DomSanitizer } from '@angular/platform-browser';
+
+export type SubsystemPayload = {
+  nqn: string;
+  gw_group: string;
+  subsystemDchapKey: string;
+  addedHosts: string[];
+  hostType: string;
+};
+
+type StepResult = { step: string; success: boolean; error?: string };
+
+const PAGE_URL = 'block/nvmeof/subsystems';
 
 @Component({
   selector: 'cd-nvmeof-subsystems-form',
   templateUrl: './nvmeof-subsystems-form.component.html',
-  styleUrls: ['./nvmeof-subsystems-form.component.scss']
+  styleUrls: ['./nvmeof-subsystems-form.component.scss'],
+  standalone: false
 })
 export class NvmeofSubsystemsFormComponent implements OnInit {
-  permission: Permission;
   subsystemForm: CdFormGroup;
   action: string;
-  resource: string;
-  pageURL: string;
-  defaultMaxNamespace: number = MAX_NAMESPACE;
   group: string;
+  steps: Step[] = [
+    {
+      label: $localize`Subsystem details`,
+      complete: false,
+      invalid: false
+    },
+    {
+      label: $localize`Host access control`,
+      invalid: false
+    },
+    {
+      label: $localize`Authentication`,
+      complete: false
+    }
+  ];
+  title: string = $localize`Create Subsystem`;
+  description: string = $localize`Subsytems define how hosts connect to NVMe namespaces and ensure secure access to storage.`;
+  isSubmitLoading: boolean = false;
+
+  @ViewChild(TearsheetComponent) tearsheet!: TearsheetComponent;
 
   constructor(
-    private authStorageService: AuthStorageService,
     public actionLabels: ActionLabelsI18n,
     public activeModal: NgbActiveModal,
+    private route: ActivatedRoute,
+    private destroyRef: DestroyRef,
     private nvmeofService: NvmeofService,
-    private taskWrapperService: TaskWrapperService,
+    private notificationService: NotificationService,
     private router: Router,
-    private route: ActivatedRoute
-  ) {
-    this.permission = this.authStorageService.getPermissions().nvmeof;
-    this.resource = $localize`Subsystem`;
-    this.pageURL = 'block/nvmeof/subsystems';
-  }
-
-  DEFAULT_NQN = 'nqn.2001-07.com.ceph:' + Date.now();
-  NQN_REGEX = /^nqn\.(19|20)\d\d-(0[1-9]|1[0-2])\.\D{2,3}(\.[A-Za-z0-9-]+)+(:[A-Za-z0-9-\.]+(:[A-Za-z0-9-\.]+)*)$/;
-  NQN_REGEX_UUID = /^nqn\.2014-08\.org\.nvmexpress:uuid:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
-
-  customNQNValidator = CdValidators.custom(
-    'pattern',
-    (nqnInput: string) =>
-      !!nqnInput && !(this.NQN_REGEX.test(nqnInput) || this.NQN_REGEX_UUID.test(nqnInput))
-  );
+    private sanitizer: DomSanitizer
+  ) {}
 
   ngOnInit() {
-    this.route.queryParams.subscribe((params) => {
+    this.route.queryParams.pipe(takeUntilDestroyed(this.destroyRef)).subscribe((params) => {
       this.group = params?.['group'];
     });
-    this.createForm();
-    this.action = this.actionLabels.CREATE;
   }
-
-  createForm() {
-    this.subsystemForm = new CdFormGroup({
-      nqn: new UntypedFormControl(this.DEFAULT_NQN, {
-        validators: [
-          this.customNQNValidator,
-          Validators.required,
-          this.customNQNValidator,
-          CdValidators.custom(
-            'maxLength',
-            (nqnInput: string) => new TextEncoder().encode(nqnInput).length > 223
-          )
-        ],
-        asyncValidators: [
-          CdValidators.unique(
-            this.nvmeofService.isSubsystemPresent,
-            this.nvmeofService,
-            null,
-            null,
-            this.group
-          )
-        ]
-      }),
-      max_namespaces: new UntypedFormControl(this.defaultMaxNamespace, {
-        validators: [
-          CdValidators.number(false),
-          Validators.max(this.defaultMaxNamespace),
-          Validators.min(1)
-        ]
-      })
-    });
-  }
-
-  onSubmit() {
-    const component = this;
-    const nqn: string = this.subsystemForm.getValue('nqn');
-    const max_namespaces: number = Number(this.subsystemForm.getValue('max_namespaces'));
-    let taskUrl = `nvmeof/subsystem/${URLVerbs.CREATE}`;
-
-    const request = {
-      nqn,
-      enable_ha: true,
-      gw_group: this.group,
-      max_namespaces
+  onSubmit(payload: SubsystemPayload) {
+    this.isSubmitLoading = true;
+    const stepResults: StepResult[] = [];
+    const initiatorRequest: InitiatorRequest = {
+      host_nqn: payload.hostType === HOST_TYPE.ALL ? '*' : payload.addedHosts.join(','),
+      gw_group: this.group
     };
 
-    if (!max_namespaces) {
-      delete request.max_namespaces;
-    }
-    this.taskWrapperService
-      .wrapTaskAroundCall({
-        task: new FinishedTask(taskUrl, {
-          nqn: nqn
-        }),
-        call: this.nvmeofService.createSubsystem(request)
+    this.nvmeofService
+      .createSubsystem({
+        nqn: payload.nqn,
+        gw_group: this.group,
+        enable_ha: true,
+        dhchap_key: payload.subsystemDchapKey
       })
       .subscribe({
-        error() {
-          component.subsystemForm.setErrors({ cdSubmitButton: true });
+        next: () => {
+          stepResults.push({ step: this.steps[0].label, success: true });
+          this.runSequentialSteps(
+            [
+              {
+                step: this.steps[1].label,
+                call: () =>
+                  this.nvmeofService.addSubsystemInitiators(
+                    `${payload.nqn}.${this.group}`,
+                    initiatorRequest
+                  )
+              }
+            ],
+            stepResults
+          ).subscribe({
+            complete: () => this.showFinalNotification(stepResults)
+          });
         },
-        complete: () => {
-          this.router.navigate([this.pageURL, { outlets: { modal: null } }]);
+        error: (err) => {
+          err.preventDefault();
+          const errorMsg = err?.error?.detail || $localize`Subsystem creation failed`;
+          this.notificationService.show(
+            NotificationType.error,
+            $localize`Subsystem creation failed`,
+            errorMsg
+          );
+          this.isSubmitLoading = false;
+          this.router.navigate([PAGE_URL, { outlets: { modal: null } }]);
         }
       });
+  }
+
+  private runSequentialSteps(
+    steps: { step: string; call: () => Observable<any> }[],
+    stepResults: StepResult[]
+  ): Observable<void> {
+    return from(steps).pipe(
+      concatMap((step) =>
+        step.call().pipe(
+          tap(() => stepResults.push({ step: step.step, success: true })),
+          catchError((err) => {
+            err.preventDefault();
+            const errorMsg = err?.error?.detail || '';
+            stepResults.push({ step: step.step, success: false, error: errorMsg });
+            return of(null);
+          })
+        )
+      ),
+      map(() => void 0)
+    );
+  }
+
+  private showFinalNotification(stepResults: StepResult[]) {
+    this.isSubmitLoading = false;
+
+    const messageLines = stepResults.map((stepResult) =>
+      stepResult.success
+        ? $localize`<div>${stepResult.step} step created successfully</div><br/>`
+        : $localize`<div>${stepResult.step} step failed: <code>${stepResult.error}</code></div><br/>`
+    );
+
+    const rawHtml = messageLines.join('<br/>');
+    const sanitizedHtml = this.sanitizer.sanitize(SecurityContext.HTML, rawHtml) ?? '';
+
+    const hasFailure = stepResults.some((r) => !r.success);
+    const type = hasFailure ? NotificationType.error : NotificationType.success;
+    const title = hasFailure
+      ? $localize`Subsystem created (with errors)`
+      : $localize`Subsystem created`;
+
+    this.notificationService.show(type, title, sanitizedHtml);
+    this.router.navigate([PAGE_URL, { outlets: { modal: null } }]);
   }
 }

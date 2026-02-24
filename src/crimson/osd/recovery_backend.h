@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
@@ -19,9 +19,8 @@
 #include "osd/recovery_types.h"
 #include "osd/osd_types.h"
 
-namespace crimson::osd{
-  class PG;
-}
+namespace crimson::osd {
+class PG;
 
 class RecoveryBackend {
 public:
@@ -220,11 +219,9 @@ public:
     }
     void set_pushed(pg_shard_t shard) {
       auto it = pushes.find(shard);
-      if (it != pushes.end()) {
-	auto &push_promise = it->second;
-	push_promise.set_value();
-	pushes.erase(it);
-      }
+      ceph_assert(it != pushes.end());
+      it->second.set_value();
+      pushes.erase(it);
     }
     void set_pulled() {
       if (pulled) {
@@ -308,3 +305,5 @@ private:
     crimson::net::ConnectionXcoreRef conn);
   interruptible_future<> handle_backfill_remove(MOSDPGBackfillRemove& m);
 };
+
+}

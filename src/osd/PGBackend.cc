@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -413,51 +414,85 @@ void PGBackend::try_stash(
 
 void PGBackend::partial_write(
    pg_info_t *info,
+   eversion_t previous_version,
    const pg_log_entry_t &entry)
 {
   ceph_assert(info != nullptr);
+  if (entry.written_shards.empty() && info->partial_writes_last_complete.empty()) {
+    return;
+  }
+  const pg_pool_t &pool = get_parent()->get_pool();
+  if (pool.is_nonprimary_shard(get_parent()->whoami_shard().shard)) {
+    // Don't update pwlc on nonprimary shards because they only
+    // observe writes that update their shard
+    return;
+  }
   auto dpp = get_parent()->get_dpp();
-  if (!entry.written_shards.empty()) {
-    ldpp_dout(dpp, 20) << __func__ << " version=" << entry.version
-		       << " written_shards=" << entry.written_shards
-		       << " present_shards=" << entry.present_shards
-		       << " pwlc=" << info->partial_writes_last_complete
-		       << dendl;
-    const pg_pool_t &pool = get_parent()->get_pool();
-    for (unsigned int shard = 0;
-	 shard < get_parent()->get_pool().size;
-	 shard++) {
-      if (pool.is_nonprimary_shard(shard_id_t(shard))) {
-        if (!entry.is_written_shard(shard_id_t(shard))) {
-	  if (!info->partial_writes_last_complete.contains(shard_id_t(shard))) {
-	    // 1st partial write since all logs were updated
-	    info->partial_writes_last_complete[shard_id_t(shard)] =
-	      std::pair(entry.prior_version, entry.version);
-	  } else if (info->partial_writes_last_complete[shard_id_t(shard)]
-		     .second.version + 1 == entry.version.version) {
-	    // Subsequent partial write, version is sequential
-	    info->partial_writes_last_complete[shard_id_t(shard)].second =
-	      entry.version;
-	  } else {
-	    // Subsequent partial write, discontiguous versions
-	    ldpp_dout(dpp, 20) << __func__ << " cannot update shard " << shard
-			       << dendl;
-	  }
-        } else {
-	  // Log updated or shard absent, partial write entry not required
-          info->partial_writes_last_complete.erase(shard_id_t(shard));
+  ldpp_dout(dpp, 20) << __func__ << " version=" << entry.version
+		     << " written_shards=" << entry.written_shards
+		     << " pwlc=e" << info->partial_writes_last_complete_epoch
+		     << ":" << info->partial_writes_last_complete
+		     << " previous_version=" << previous_version
+		     << dendl;
+  for (shard_id_t shard : pool.nonprimary_shards) {
+    auto pwlc_iter = info->partial_writes_last_complete.find(shard);
+    if (!entry.is_written_shard(shard)) {
+      if (pwlc_iter == info->partial_writes_last_complete.end()) {
+	// 1st partial write since all logs were updated
+	info->partial_writes_last_complete[shard] =
+	  std::pair(previous_version, entry.version);
+        info->partial_writes_last_complete_epoch = get_osdmap_epoch();
+	continue;
+      }
+      auto &&[old_v,  new_v] = pwlc_iter->second;
+      if (old_v == new_v) {
+        if (old_v.version == eversion_t::max().version) {
+	  // shard is backfilling or in async recovery, pwlc is
+	  // invalid
+	  ldpp_dout(dpp, 20) << __func__ << " pwlc invalid " << shard
+			   << dendl;
+	} else if (old_v >= entry.version) {
+	  // Abnormal case - consider_adjusting_pwlc may advance pwlc
+	  // during peering because all shards have updates but these
+	  // have not been marked complete. At the end of peering
+	  // partial_write catches up with these entries - these need
+	  // to be ignored to preserve old_v.epoch
+	  ldpp_dout(dpp, 20) << __func__ << " pwlc is ahead of entry " << shard
+			   << dendl;
+	} else {
+	  old_v = previous_version;
+	  new_v = entry.version;
+	  info->partial_writes_last_complete_epoch = get_osdmap_epoch();
 	}
+      } else if (new_v == previous_version) {
+	// Subsequent partial write, contiguous versions
+	new_v = entry.version;
+	info->partial_writes_last_complete_epoch = get_osdmap_epoch();
+      } else {
+	// Subsequent partial write, discontiguous versions
+	ldpp_dout(dpp, 20) << __func__ << " cannot update shard " << shard
+			   << dendl;
+      }
+    } else if (pwlc_iter != info->partial_writes_last_complete.end()) {
+      auto &&[old_v,  new_v] = pwlc_iter->second;
+      // Log updated or shard absent, partial write entry is a no-op
+      if (old_v.version == eversion_t::max().version) {
+	// shard is backfilling or in async recovery, pwlc is invalid
+	ldpp_dout(dpp, 20) << __func__ << " pwlc invalid " << shard
+			   << dendl;
+      } else if (old_v >= entry.version) {
+	// Abnormal case - see above
+	ldpp_dout(dpp, 20) << __func__ << " pwlc is ahead of entry " << shard
+			   << dendl;
+      } else {
+	old_v = new_v = entry.version;
+	info->partial_writes_last_complete_epoch = get_osdmap_epoch();
       }
     }
-    ldpp_dout(dpp, 20) << __func__ << " after pwlc="
-		       << info->partial_writes_last_complete << dendl;
-  } else {
-    // All shard updated - clear partial write data
-    if (!info->partial_writes_last_complete.empty()) {
-      ldpp_dout(dpp, 20) << __func__ << " clear pwlc" << dendl;
-    }
-    info->partial_writes_last_complete.clear();
   }
+  ldpp_dout(dpp, 20) << __func__ << " after pwlc=e"
+		     << info->partial_writes_last_complete_epoch
+		     << ":" << info->partial_writes_last_complete << dendl;
 }
 
 void PGBackend::remove(

@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "replicated_backend.h"
 
@@ -14,6 +14,8 @@
 #include "osd/PeeringState.h"
 
 SET_SUBSYS(osd);
+
+namespace crimson::osd {
 
 ReplicatedBackend::ReplicatedBackend(pg_t pgid,
                                      pg_shard_t whoami,
@@ -253,7 +255,7 @@ void ReplicatedBackend::got_rep_op_reply(const MOSDRepOpReply& reply)
 seastar::future<> ReplicatedBackend::stop()
 {
   LOG_PREFIX(ReplicatedBackend::stop);
-  INFODPP("cid {}", coll->get_cid());
+  INFODPP("cid {}", dpp, coll->get_cid());
   for (auto& [tid, pending_on] : pending_trans) {
     pending_on.all_committed.set_exception(
 	crimson::common::system_shutdown_exception());
@@ -354,4 +356,6 @@ void ReplicatedBackend::do_pct(const MOSDPGPCT &m)
   LOG_PREFIX(ReplicatedBackend::do_pct);
   DEBUGDPP("{}", dpp, m);
   pg.peering_state.update_pct(m.pg_committed_to);
+}
+
 }

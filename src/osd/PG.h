@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*- 
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -20,7 +21,7 @@
 #include "include/mempool.h"
 
 // re-include our assert to clobber boost's
-#include "common/admin_finisher.h"
+#include "common/admin_finisher.h" // for asok_finisher
 #include "include/ceph_assert.h" 
 #include "include/common_fwd.h"
 
@@ -49,6 +50,7 @@
 #include <memory>
 #include <string>
 #include <tuple>
+#include <vector>
 
 //#define DEBUG_RECOVERY_OIDS   // track std::set of recovering oids explicitly, to find counting bugs
 //#define PG_DEBUG_REFS    // track provenance of pg refs, helpful for finding leaks
@@ -78,6 +80,7 @@ namespace Scrub {
   void put_with_id(PG *pg, uint64_t id);
   typedef TrackedIntPtr<PG> PGRef;
 #else
+#include <boost/intrusive_ptr.hpp>
   typedef boost::intrusive_ptr<PG> PGRef;
 #endif
 
@@ -248,6 +251,20 @@ public:
   bool is_waiting_for_unreadable_object() const final
   {
     return !waiting_for_unreadable_object.empty();
+  }
+
+  bool get_is_nonprimary_shard(const pg_shard_t &shard) const final
+  {
+    return get_pgbackend()->get_is_nonprimary_shard(shard.shard);
+  }
+
+  bool get_is_hinfo_required() const final
+  {
+    return get_pgbackend()->get_is_hinfo_required();
+  }
+
+  bool get_is_ec_optimized() const final {
+    return get_pgbackend()->get_is_ec_optimized();
   }
 
   static void set_last_scrub_stamp(
@@ -693,9 +710,6 @@ public:
   unsigned int scrub_requeue_priority(Scrub::scrub_prio_t with_priority) const;
 
 private:
-  // auxiliaries used by sched_scrub():
-  double next_deepscrub_interval() const;
-
   using ScrubAPI = void (ScrubPgIF::*)(epoch_t epoch_queued);
   void forward_scrub_event(ScrubAPI fn, epoch_t epoch_queued, std::string_view desc);
   // and for events that carry a meaningful 'activation token'
@@ -1130,8 +1144,10 @@ protected:
     void trim(const pg_log_entry_t &entry) override {
       pg->get_pgbackend()->trim(entry, t);
     }
-    void partial_write(pg_info_t *info, const pg_log_entry_t &entry) override {
-      pg->get_pgbackend()->partial_write(info, entry);
+    void partial_write(pg_info_t *info, eversion_t previous_version,
+                       const pg_log_entry_t &entry
+      ) override {
+      pg->get_pgbackend()->partial_write(info, previous_version, entry);
     }
   };
 
@@ -1209,7 +1225,15 @@ protected:
   [[nodiscard]] bool ops_blocked_by_scrub() const;
   [[nodiscard]] Scrub::scrub_prio_t is_scrub_blocking_ops() const;
 
-  void _scan_rollback_obs(const std::vector<ghobject_t> &rollback_obs);
+
+  /**
+   * Scan the given list of rollback objects for obsolete entries.
+   * If found - the obsolete entries are removed.
+   *
+   * @return 'true' if a transaction was issued.
+   */
+  bool _scan_rollback_obs(const std::vector<ghobject_t> &rollback_obs);
+
   /**
    * returns true if [begin, end) is good to scrub at this time
    * a false return value obliges the implementer to requeue scrub when the
@@ -1396,8 +1420,31 @@ public:
  }
 
  uint64_t logical_to_ondisk_size(uint64_t logical_size,
-                                 int8_t shard_id) const final {
-   return get_pgbackend()->be_get_ondisk_size(logical_size, shard_id_t(shard_id));
+                                 shard_id_t shard_id,
+                                 bool object_is_legacy_ec) const final {
+   return get_pgbackend()->be_get_ondisk_size(logical_size, shard_id_t(shard_id), object_is_legacy_ec);
+ }
+
+ bool ec_can_decode(const shard_id_set &available_shards) const final {
+   return get_pgbackend()->ec_can_decode(available_shards);
+ }
+
+ shard_id_map<bufferlist> ec_encode_acting_set(
+     const bufferlist &in_bl) const final {
+   return get_pgbackend()->ec_encode_acting_set(in_bl);
+ }
+
+ shard_id_map<bufferlist> ec_decode_acting_set(
+     const shard_id_map<bufferlist> &shard_map, int chunk_size) const final {
+   return get_pgbackend()->ec_decode_acting_set(shard_map, chunk_size);
+ }
+
+ bool get_ec_supports_crc_encode_decode() const final {
+   return get_pgbackend()->get_ec_supports_crc_encode_decode();
+ }
+
+ ECUtil::stripe_info_t get_ec_sinfo() const final {
+   return get_pgbackend()->ec_get_sinfo();
  }
 };
 

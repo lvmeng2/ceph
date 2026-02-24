@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include <string.h>
 
@@ -76,7 +76,6 @@ BtreeOMapManager::handle_root_split(
     omap_node_meta_t meta{omap_root.depth + 1};
     nroot->init_range(BEGIN_KEY, END_KEY);
     nroot->set_meta(meta);
-    left->init_range(BEGIN_KEY, pivot);
     nroot->insert_child_ptr(
       nroot->iter_begin().get_offset(),
       dynamic_cast<BaseChildNode<OMapInnerNode, std::string>*>(left.get()));
@@ -85,7 +84,6 @@ BtreeOMapManager::handle_root_split(
     nroot->insert_child_ptr(
       (nroot->iter_begin() + 1).get_offset(),
       dynamic_cast<BaseChildNode<OMapInnerNode, std::string>*>(right.get()));
-    right->init_range(pivot, END_KEY);
     nroot->journal_inner_insert(nroot->iter_begin() + 1, right->get_laddr(),
                                 pivot, nroot->maybe_get_delta_buffer());
     omap_root.update(nroot->get_laddr(), omap_root.get_depth() + 1, omap_root.hint,
@@ -173,7 +171,10 @@ BtreeOMapManager::omap_set_key(
   const ceph::bufferlist &value)
 {
   LOG_PREFIX(BtreeOMapManager::omap_set_key);
-  DEBUGT("{} -> {}", t, key, value);
+  DEBUGT("{} -> 0x{:x} value", t, key, value.length());
+  // #FIXME: heap buffer overflow during logging if value is long (e.g. 1020B)
+  // https://tracker.ceph.com/issues/71524
+  // DEBUGT("{} -> {}", t, key, value);
   return get_omap_root(
     get_omap_context(t, omap_root),
     omap_root
@@ -209,12 +210,12 @@ BtreeOMapManager::omap_rm_key(
       return seastar::now();
     } else if (mresult.status == mutation_status_t::WAS_SPLIT) {
       return handle_root_split(
-	get_omap_context(t, omap_root), omap_root, mresult);
+        get_omap_context(t, omap_root), omap_root, mresult);
     } else if (mresult.status == mutation_status_t::NEED_MERGE) {
       auto root = *(mresult.need_merge);
       if (root->get_node_size() == 1 && omap_root.depth != 1) {
         return handle_root_merge(
-	  get_omap_context(t, omap_root), omap_root, mresult);
+          get_omap_context(t, omap_root), omap_root, mresult);
       } else {
         return seastar::now(); 
       }
@@ -222,7 +223,6 @@ BtreeOMapManager::omap_rm_key(
       return seastar::now();
     }
   });
-
 }
 
 BtreeOMapManager::omap_rm_key_range_ret
@@ -230,40 +230,47 @@ BtreeOMapManager::omap_rm_key_range(
   omap_root_t &omap_root,
   Transaction &t,
   const std::string &first,
-  const std::string &last,
-  omap_list_config_t config)
+  const std::string &last)
 {
   LOG_PREFIX(BtreeOMapManager::omap_rm_key_range);
   DEBUGT("{} ~ {}", t, first, last);
   assert(first <= last);
-  return seastar::do_with(
-    std::make_optional<std::string>(first),
-    std::make_optional<std::string>(last),
-    [this, &omap_root, &t, config](auto &first, auto &last) {
-    return omap_list(
-      omap_root,
-      t,
-      first,
-      last,
-      config);
-  }).si_then([this, &omap_root, &t](auto results) {
-    LOG_PREFIX(BtreeOMapManager::omap_rm_key_range);
-    auto &[complete, kvs] = results;
-    std::vector<std::string> keys;
-    for (const auto& [k, _] : kvs) {
-      keys.push_back(k);
+  assert(last != "");
+  key_range_t key_range(first, last, 0, false, false);
+  while (key_range.total_complete == false) {
+    auto root = co_await get_omap_root(get_omap_context(t, omap_root), omap_root);
+    key_range.root_depth = omap_root.depth;
+    auto mresult = co_await root->rm_key_range(get_omap_context(t, omap_root), key_range);
+    if (mresult.status == mutation_status_t::SUCCESS) {
+      continue;
+    } else if (mresult.status == mutation_status_t::WAS_SPLIT) {
+      co_await handle_root_split(get_omap_context(t, omap_root), omap_root, mresult);
+    } else if (mresult.status == mutation_status_t::NEED_MERGE) {
+      auto root = *(mresult.need_merge);
+      if (root->get_node_size() == 1 && omap_root.depth != 1) {
+        co_await handle_root_merge(get_omap_context(t, omap_root), omap_root, mresult);
+      }
     }
-    DEBUGT("total {} keys to remove", t, keys.size());
-    return seastar::do_with(
-      std::move(keys),
-      [this, &omap_root, &t](auto& keys) {
-      return trans_intr::do_for_each(
-	keys.begin(),
-	keys.end(),
-	[this, &omap_root, &t](auto& key) {
-	return omap_rm_key(omap_root, t, key);
-      });
-    });
+  }
+}
+
+BtreeOMapManager::omap_iterate_ret
+BtreeOMapManager::omap_iterate(
+  const omap_root_t &omap_root,
+  Transaction &t,
+  ObjectStore::omap_iter_seek_t &start_from,
+  omap_iterate_cb_t callback)
+{
+  LOG_PREFIX(BtreeOMapManager::omap_iterate);
+  DEBUGT("{}, {}", t, omap_root, start_from);
+  return get_omap_root(
+    get_omap_context(t, omap_root),
+    omap_root
+  ).si_then([this, &t, &start_from, callback, &omap_root](auto extent) {
+    return extent->iterate(
+      get_omap_context(t, omap_root),
+      start_from,
+      callback);
   });
 }
 

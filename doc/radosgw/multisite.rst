@@ -99,7 +99,7 @@ At the bottom of this diagram, we see the data distributed into the Ceph
 Storage Cluster.
 
 For additional details on setting up a cluster, see `Ceph Object Gateway for
-Production <https://access.redhat.com/documentation/en-us/red_hat_ceph_storage/3/html/ceph_object_gateway_for_production/index/>`__.
+Production <https://access.redhat.com/documentation/en-us/red_hat_ceph_storage/3/html/ceph_object_gateway_for_production/index/>`_.
 
 Functional Changes from Infernalis
 ==================================
@@ -121,12 +121,12 @@ Requirements and Assumptions
 ============================
 
 A multi-site configuration requires at least two Ceph storage clusters. The
-multi-site configuration must have at least two Ceph object gateway instances
+multi-site configuration must have at least two Ceph Object Gateway instances
 (one for each Ceph storage cluster).
 
 This guide assumes that at least two Ceph storage clusters are in
 geographically separate locations; however, the configuration can work on the
-same site. This guide also assumes two Ceph object gateway servers named
+same site. This guide also assumes two Ceph Object Gateway servers named
 ``rgw1`` and ``rgw2``.
 
 .. important:: Running a single geographically-distributed Ceph storage cluster
@@ -140,11 +140,11 @@ In this guide, the ``rgw1`` host will serve as the master zone of the master
 zonegroup; and, the ``rgw2`` host will serve as the secondary zone of the
 master zonegroup.
 
-See `Pools`_ for instructions on creating and tuning pools for Ceph Object
-Storage.
+See :ref:`radosgw-pools` for instructions on creating and tuning pools for the
+Ceph Object Gateway.
 
-See `Sync Policy Config`_ for instructions on defining fine-grained bucket sync
-policy rules.
+See :ref:`Sync Policy Config <radosgw-multisite-sync-policy>` for instructions
+on defining fine-grained bucket sync policy rules.
 
 .. _master-zone-label:
 
@@ -288,7 +288,7 @@ Delete Default Zonegroup and Zone
 
    .. prompt:: bash #
 
-      radosgw-admin zonegroup delete --rgw-zonegroup=default --rgw-zone=default
+      radosgw-admin zonegroup remove --rgw-zonegroup=default --rgw-zone=default
       radosgw-admin period update --commit
       radosgw-admin zone delete --rgw-zone=default
       radosgw-admin period update --commit
@@ -831,9 +831,8 @@ to a multi-site system, follow these steps:
 
       systemctl restart ceph-radosgw@rgw.`hostname -s`
 
-After completing this procedure, proceed to `Configure a Secondary
-Zone <#configure-secondary-zones>`_ and create a secondary zone
-in the master zonegroup.
+After completing this procedure, proceed to :ref:`secondary-zone-label`
+and create a secondary zone in the master zonegroup.
 
 Multi-Site Configuration Reference
 ==================================
@@ -1382,7 +1381,9 @@ Zones
 -----
 
 A zone defines a logical group that consists of one or more Ceph Object Gateway
-instances. All Ceph Object Gateways in a given zone serve S3 objects that are backed by RADOS objects that are stored in the same set of pools in the same cluster. Ceph Object Gateway supports zones.
+instances. All Ceph Object Gateways in a given zone serve S3 objects that are
+backed by RADOS objects that are stored in the same set of pools in the same
+cluster. Ceph Object Gateway supports zones.
 
 The procedure for configuring zones differs from typical configuration
 procedures, because not all of the settings end up in a Ceph configuration
@@ -1537,9 +1538,8 @@ Setting a Zone
 
 Configuring a zone involves specifying a series of Ceph Object Gateway
 pools. For consistency, we recommend using a pool prefix that is the
-same as the zone name. See
-`Pools <http://docs.ceph.com/en/latest/rados/operations/pools/#pools>`__
-for details of configuring pools.
+same as the zone name. See :ref:`rados_pools` for details of
+configuring pools.
 
 To set a zone, create a JSON object consisting of the pools, save the
 object to a file (e.g., ``zone.json``); then, run the following
@@ -1602,6 +1602,3 @@ instance.
 |                                     | changing this setting.            |         |                       |
 +-------------------------------------+-----------------------------------+---------+-----------------------+
 
-
-.. _`Pools`: ../pools
-.. _`Sync Policy Config`: ../multisite-sync-policy

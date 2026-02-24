@@ -18,13 +18,8 @@ set -xe
 
 . /etc/os-release
 base=${1:-/tmp/release}
-releasedir=$base/$NAME/WORKDIR
+releasedir=$base/$ID/WORKDIR
 rm -fr $(dirname $releasedir)
-#
-# remove all files not under git so they are not
-# included in the distribution.
-
-[ -e .git ] && git clean -dxf
 
 # git describe provides a version that is
 # a) human readable
@@ -46,24 +41,35 @@ fi
 
 test -f "ceph-$vers.tar.bz2" || ./make-dist $vers
 #
-# rename the tarbal to match debian conventions and extract it
+# rename the tarball to match debian conventions and extract it
 #
 mkdir -p $releasedir
 mv ceph-$vers.tar.bz2 $releasedir/ceph_$vers.orig.tar.bz2
-tar -C $releasedir -jxf $releasedir/ceph_$vers.orig.tar.bz2
+tar -C $releasedir --no-same-owner -jxf $releasedir/ceph_$vers.orig.tar.bz2
+
 #
-# copy the debian directory over and remove -dbg packages
+# Optionally disable -dbg package builds
 # because they are large and take time to build
 #
 cp -a debian $releasedir/ceph-$vers/debian
 cd $releasedir
-perl -ni -e 'print if(!(/^Package: .*-dbg$/../^$/))' ceph-$vers/debian/control
-perl -pi -e 's/--dbg-package.*//' ceph-$vers/debian/rules
+if [[ -n "$SKIP_DEBUG_PACKAGES" ]] ; then
+	perl -ni -e 'print if(!(/^Package: .*-dbg$/../^$/))' ceph-$vers/debian/control
+	perl -pi -e 's/--dbg-package.*//' ceph-$vers/debian/rules
+fi
+
+# For cache hit consistency, allow CI builds to use a build directory whose name
+# does not contain version information
+if [ "${CEPH_BUILD_NORMALIZE_PATHS}" = 'true' ]; then
+    mv ceph-$vers ceph
+    cd ceph
+else
+    cd ceph-$vers
+fi
 
 #
 # update the changelog to match the desired version
 #
-cd ceph-$vers
 chvers=$(head -1 debian/changelog | perl -ne 's/.*\(//; s/\).*//; print')
 if [ "$chvers" != "$dvers" ]; then
    DEBEMAIL="contact@ceph.com" dch -D $VERSION_CODENAME --force-distribution -b -v "$dvers" "new version"
@@ -74,14 +80,22 @@ fi
 # b) do not sign the packages
 # c) use half of the available processors
 #
-: ${NPROC:=$(($(nproc) / 2))}
-if test $NPROC -gt 1 ; then
-    j=-j${NPROC}
+: ${NPROC:=$(nproc)}
+RAM_MB=$(vmstat --stats --unit m | grep 'total memory' | awk '{print $1}')
+if test "$NPROC" -gt 50; then
+    MAX_JOBS=$((${RAM_MB} / 4000))
+else
+    MAX_JOBS=$((${RAM_MB} / 3000))
+fi
+if test "$NPROC" -gt "$MAX_JOBS"; then
+    JOBS_FLAG="-j${MAX_JOBS}"
+else
+    JOBS_FLAG="-j${NPROC}"
 fi
 if [ "$SCCACHE" != "true" ] ; then
     PATH=/usr/lib/ccache:$PATH
 fi
-PATH=$PATH dpkg-buildpackage $j -uc -us
+PATH=$PATH dpkg-buildpackage $JOBS_FLAG -uc -us
 cd ../..
 mkdir -p $VERSION_CODENAME/conf
 cat > $VERSION_CODENAME/conf/distributions <<EOF

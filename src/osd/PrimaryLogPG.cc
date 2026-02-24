@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -551,7 +552,7 @@ common::intrusive_timer &PrimaryLogPG::get_pg_timer()
   return osd->pg_timer;
 }
 
-void PrimaryLogPG::replica_clear_repop_obc(
+void PrimaryLogPG::clear_repop_obc(
   const vector<pg_log_entry_t> &logv,
   ObjectStore::Transaction &t)
 {
@@ -852,7 +853,7 @@ void PrimaryLogPG::maybe_force_recovery()
 
 bool PrimaryLogPG::check_laggy(OpRequestRef& op)
 {
-  assert(HAVE_FEATURE(recovery_state.get_min_upacting_features(),
+  ceph_assert(HAVE_FEATURE(recovery_state.get_min_upacting_features(),
 		      SERVER_OCTOPUS));
   if (state_test(PG_STATE_WAIT)) {
     dout(10) << __func__ << " PG is WAIT state" << dendl;
@@ -884,7 +885,7 @@ bool PrimaryLogPG::check_laggy(OpRequestRef& op)
 
 bool PrimaryLogPG::check_laggy_requeue(OpRequestRef& op)
 {
-  assert(HAVE_FEATURE(recovery_state.get_min_upacting_features(),
+  ceph_assert(HAVE_FEATURE(recovery_state.get_min_upacting_features(),
 		      SERVER_OCTOPUS));
   if (!state_test(PG_STATE_WAIT) && !state_test(PG_STATE_LAGGY)) {
     return true; // not laggy
@@ -1199,6 +1200,16 @@ void PrimaryLogPG::do_command(
       ret = -EPERM;
     }
     outbl.append(ss.str());
+  }
+
+  else if (prefix == "scrub-abort") {
+    if (is_primary()) {
+      m_scrubber->on_operator_abort_scrub(f.get());
+    } else {
+      ss << "Not primary";
+      ret = -EPERM;
+      outbl.append(ss.str());
+    }
   }
 
   // the test/debug commands that schedule a scrub by modifying timestamps
@@ -2045,8 +2056,23 @@ void PrimaryLogPG::do_op(OpRequestRef& op)
     }
   }
 
-  if ((m->get_flags() & (CEPH_OSD_FLAG_BALANCE_READS |
-			 CEPH_OSD_FLAG_LOCALIZE_READS)) &&
+  // check for op with rwordered and rebalance or localize reads
+  if (m->has_flag(CEPH_OSD_FLAGS_DIRECT_READ) && op->rwordered()) {
+    dout(4) << __func__ << ": rebelance or localized reads with rwordered not allowed "
+       << *m << dendl;
+    osd->reply_op_error(op, -EINVAL);
+    return;
+  }
+
+  if (m->get_flags() & CEPH_OSD_FLAG_EC_DIRECT_READ) {
+    if (is_primary() || is_nonprimary()) {
+      op->set_ec_direct_read();
+    } else {
+      osd->handle_misdirected_op(this, op);
+      return;
+    }
+  } else if ((m->get_flags() & (CEPH_OSD_FLAG_BALANCE_READS |
+                                CEPH_OSD_FLAG_LOCALIZE_READS)) &&
       op->may_read() &&
       !(op->may_write() || op->may_cache())) {
     // balanced reads; any replica will do
@@ -2195,7 +2221,9 @@ void PrimaryLogPG::do_op(OpRequestRef& op)
 
   // missing object?
   if (is_unreadable_object(head)) {
-    if (!is_primary()) {
+    if (!is_primary() && is_missing_any_head_or_clone_of(head)) {
+      dout(10) << __func__ <<  "possibly missing clone object " << head
+               << " on this replica, bouncing to primary" << dendl;
       osd->logger->inc(l_osd_replica_read_redirect_missing);
       osd->reply_op_error(op, -EAGAIN);
       return;
@@ -2334,15 +2362,20 @@ void PrimaryLogPG::do_op(OpRequestRef& op)
   }
 
   if (!is_primary()) {
-    if (!recovery_state.can_serve_replica_read(oid)) {
+    if (!recovery_state.can_serve_read(oid)) {
+      std::string_view storage_object = "replica";
+      if (pool.info.is_erasure()) {
+        storage_object = "shard";
+      }
       dout(20) << __func__
-               << ": unstable write on replica, bouncing to primary "
+               << ": unstable write on " << storage_object
+               << ", bouncing to primary "
 	       << *m << dendl;
       osd->logger->inc(l_osd_replica_read_redirect_conflict);
       osd->reply_op_error(op, -EAGAIN);
       return;
     }
-    dout(20) << __func__ << ": serving replica read on oid " << oid
+    dout(20) << __func__ << ": serving read on oid " << oid
              << dendl;
     osd->logger->inc(l_osd_replica_read_served);
   }
@@ -3986,7 +4019,7 @@ void PrimaryLogPG::finish_proxy_write(hobject_t oid, ceph_tid_t tid, int r)
 
   if (!pwop->sent_reply) {
     // send commit.
-    assert(pwop->ctx->reply == nullptr);
+    ceph_assert(pwop->ctx->reply == nullptr);
     MOSDOpReply *reply = new MOSDOpReply(m, r, get_osdmap_epoch(), 0,
 					 true /* we claim it below */);
     reply->set_reply_versions(eversion_t(), pwop->user_version);
@@ -5871,6 +5904,13 @@ int PrimaryLogPG::do_read(OpContext *ctx, OSDOp& osd_op) {
     if (oi.is_data_digest() && op.extent.offset == 0 &&
         op.extent.length >= oi.size)
       maybe_crc = oi.data_digest;
+
+    if (ctx->op->ec_direct_read()) {
+      result = pgbackend->objects_read_sync(
+        soid, op.extent.offset, op.extent.length, op.flags, &osd_op.outdata);
+
+        dout(20) << " EC sync read for " << soid << " result=" << result << dendl;
+    } else {
     ctx->pending_async_reads.push_back(
       make_pair(
         boost::make_tuple(op.extent.offset, op.extent.length, op.flags),
@@ -5882,6 +5922,7 @@ int PrimaryLogPG::do_read(OpContext *ctx, OSDOp& osd_op) {
 
     ctx->op_finishers[ctx->current_osd_subop_num].reset(
       new ReadFinisher(osd_op));
+    }
   } else {
     int r = pgbackend->objects_read_sync(
       soid, op.extent.offset, op.extent.length, op.flags, &osd_op.outdata);
@@ -5941,7 +5982,7 @@ int PrimaryLogPG::do_sparse_read(OpContext *ctx, OSDOp& osd_op) {
   }
 
   ++ctx->num_read;
-  if (pool.info.is_erasure()) {
+  if (pool.info.is_erasure() && !ctx->op->ec_direct_read()) {
     // translate sparse read to a normal one if not supported
 
     if (length > 0) {
@@ -5960,13 +6001,16 @@ int PrimaryLogPG::do_sparse_read(OpContext *ctx, OSDOp& osd_op) {
       dout(10) << " sparse read ended up empty for " << soid << dendl;
       map<uint64_t, uint64_t> extents;
       encode(extents, osd_op.outdata);
+      bufferlist data_bl;
+      encode(data_bl, osd_op.outdata);
     }
   } else {
     // read into a buffer
     map<uint64_t, uint64_t> m;
+    auto [shard_offset, shard_length] = pgbackend->extent_to_shard_extent(offset, length);
     int r = osd->store->fiemap(ch, ghobject_t(soid, ghobject_t::NO_GEN,
 					      info.pgid.shard),
-			       offset, length, m);
+			       shard_offset, shard_length, m);
     if (r < 0)  {
       return r;
     }
@@ -5977,6 +6021,7 @@ int PrimaryLogPG::do_sparse_read(OpContext *ctx, OSDOp& osd_op) {
       r = rep_repair_primary_object(soid, ctx);
     }
     if (r < 0) {
+      dout(10) << " sparse_read failed r=" << r << " from object " << soid << dendl;
       return r;
     }
 
@@ -10727,7 +10772,7 @@ std::pair<int, hobject_t> PrimaryLogPG::get_fpoid_from_chunk(
       case pg_pool_t::TYPE_FINGERPRINT_SHA512:
 	return ceph::crypto::digest<ceph::crypto::SHA512>(chunk).to_str();
       default:
-	assert(0 == "unrecognized fingerprint type");
+	ceph_assert(0 == "unrecognized fingerprint type");
 	return {};
     }
   }();    
@@ -13793,7 +13838,9 @@ uint64_t PrimaryLogPG::recover_replicas(uint64_t max, ThreadPool::TPHandle &hand
     size_t m_sz = pm->second.num_missing();
 
     dout(10) << " peer osd." << peer << " missing " << m_sz << " objects." << dendl;
-    dout(20) << " peer osd." << peer << " missing " << pm->second.get_items() << dendl;
+    // This log statement is verbose - a PG with 8000 missing objects can
+    // generate 1M+ character log entries and several GB of log output per recovery
+    dout(25) << " peer osd." << peer << " missing " << pm->second.get_items() << dendl;
 
     // oldest first!
     const pg_missing_t &m(pm->second);
@@ -14107,7 +14154,7 @@ uint64_t PrimaryLogPG::recover_backfill(
 	dout(20) << " BACKFILL keeping " << check
 		 << " with ver " << obj_v
 		 << " on peers " << keep_ver_targs << dendl;
-	//assert(!waiting_for_degraded_object.count(check));
+	//ceph_assert(!waiting_for_degraded_object.count(check));
       }
       if (!need_ver_targs.empty() || !missing_targs.empty()) {
 	ObjectContextRef obc = get_object_context(backfill_info.begin, false);
@@ -14480,9 +14527,9 @@ void PrimaryLogPG::scan_range_primary(
       bool added_default = false;
       for (auto & shard: backfill_targets) {
 	if (shard_versions.contains(shard.shard)) {
-	  version = shard_versions.at(shard.shard);
+	  auto shard_version = shard_versions.at(shard.shard);
 	  bi->objects.insert(make_pair(*p, std::make_pair(shard.shard,
-							  version)));
+							  shard_version)));
 	} else if (!added_default) {
 	  bi->objects.insert(make_pair(*p, std::make_pair(shard_id_t::NO_SHARD,
 							  version)));

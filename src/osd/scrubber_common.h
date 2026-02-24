@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 #pragma once
 
 #include <iosfwd>
@@ -8,6 +9,7 @@
 #include <string_view>
 
 #include <fmt/ranges.h>
+
 #include "common/ceph_time.h"
 #include "common/fmt_common.h"
 #include "common/scrub_types.h"
@@ -17,6 +19,7 @@
 #include "os/ObjectStore.h"
 #include "osd/osd_perf_counters.h" // for osd_counter_idx_t
 
+#include "ECUtil.h"
 #include "OpRequest.h"
 
 namespace ceph {
@@ -124,23 +127,13 @@ enum class schedule_result_t {
 };
 
 /// a collection of the basic scheduling information of a scrub target:
-/// target time to scrub, the 'not before' time, and a deadline.
+/// target time to scrub, and the 'not before'.
 struct scrub_schedule_t {
   /**
    * the time at which we are allowed to start the scrub. Never
    * decreasing after 'scheduled_at' is set.
    */
   utime_t not_before{utime_t::max()};
-
-  /**
-   * the 'deadline' is the time by which we expect the periodic scrub to
-   * complete. It is determined by the SCRUB_MAX_INTERVAL pool configuration
-   * and by osd_scrub_max_interval;
-   * Once passed, the scrub will be allowed to run even if the OSD is
-   * overloaded.It would also have higher priority than other
-   * auto-scheduled scrubs.
-   */
-  utime_t deadline{utime_t::max()};
 
   /**
    * the 'scheduled_at' is the time at which we intended the scrub to be scheduled.
@@ -159,12 +152,9 @@ struct scrub_schedule_t {
   {
     // when compared - the 'not_before' is ignored, assuming
     // we never compare jobs with different eligibility status.
-    auto cmp1 = scheduled_at <=> rhs.scheduled_at;
-    if (cmp1 != 0) {
-      return cmp1;
-    }
-    return deadline <=> rhs.deadline;
+    return scheduled_at <=> rhs.scheduled_at;
   };
+
   bool operator==(const scrub_schedule_t& rhs) const = default;
 };
 
@@ -189,8 +179,7 @@ struct formatter<Scrub::OSDRestrictions> {
   constexpr auto parse(format_parse_context& ctx) { return ctx.begin(); }
 
   template <typename FormatContext>
-  auto format(const Scrub::OSDRestrictions& conds, FormatContext& ctx) const
-  {
+  auto format(const Scrub::OSDRestrictions& conds, FormatContext& ctx) const {
     return fmt::format_to(
 	ctx.out(), "<{}.{}.{}.{}.{}>",
 	conds.max_concurrency_reached ? "max-scrubs" : "",
@@ -205,11 +194,9 @@ template <>
 struct formatter<Scrub::scrub_schedule_t> {
   constexpr auto parse(format_parse_context& ctx) { return ctx.begin(); }
   template <typename FormatContext>
-  auto format(const Scrub::scrub_schedule_t& sc, FormatContext& ctx) const
-  {
+  auto format(const Scrub::scrub_schedule_t& sc, FormatContext& ctx) const {
     return fmt::format_to(
-	ctx.out(), "nb:{:s}(at:{:s},dl:{:s})", sc.not_before,
-        sc.scheduled_at, sc.deadline);
+	ctx.out(), "nb:{:s}(at:{:s})", sc.not_before, sc.scheduled_at);
   }
 };
 
@@ -232,6 +219,7 @@ enum class delay_cause_t {
   aborted,	    ///< scrub was aborted w/ unspecified reason
   interval,	    ///< the interval had ended mid-scrub
   scrub_params,     ///< the specific scrub type is not allowed
+  operator_abort    ///< operator-requested abort
 };
 }  // namespace Scrub
 
@@ -255,6 +243,7 @@ struct formatter<Scrub::delay_cause_t> : ::fmt::formatter<std::string_view> {
       case aborted:             desc = "aborted"; break;
       case interval:            desc = "interval"; break;
       case scrub_params:        desc = "scrub-mode"; break;
+      case operator_abort:      desc = "operator-abort"; break;
       // better to not have a default case, so that the compiler will warn
     }
     return ::fmt::formatter<string_view>::format(desc, ctx);
@@ -280,10 +269,43 @@ struct PgScrubBeListener {
 
   // query the PG backend for the on-disk size of an object
   virtual uint64_t logical_to_ondisk_size(uint64_t logical_size,
-                                 int8_t shard_id) const = 0;
+                                 shard_id_t shard_id,
+                                 bool object_is_legacy_ec) const = 0;
 
   // used to verify our "cleanliness" before scrubbing
   virtual bool is_waiting_for_unreadable_object() const = 0;
+
+  // A non-primary shard is one which can never become primary. It may
+  // have an old version and cannot be considered authoritative.
+  virtual bool get_is_nonprimary_shard(const pg_shard_t &pg_shard) const = 0;
+
+  // hinfo objects are not used for some EC configurations. Do not raise scrub
+  // errors on hinfo if they should not exist.
+  virtual bool get_is_hinfo_required() const = 0;
+
+  // If true, the EC optimisations have been enabled.
+  virtual bool get_is_ec_optimized() const = 0;
+
+  // If true, EC can decode all shards using the available shards
+  virtual bool ec_can_decode(const shard_id_set& available_shards) const = 0;
+
+  // Returns a map of the data + encoded parity shards when supplied with
+  // a bufferlist containing the data shards
+  virtual shard_id_map<bufferlist> ec_encode_acting_set(
+      const bufferlist& in_bl) const = 0;
+
+  // Returns a map of all shards when given a map with missing shards that need
+  // to be decoded
+  virtual shard_id_map<bufferlist> ec_decode_acting_set(
+      const shard_id_map<bufferlist>& shard_map, int chunk_size) const = 0;
+
+  // If true, the EC profile supports passing CRCs through the EC plugin encode
+  // and decode functions to get a resulting CRC that is the same as if you were
+  // to encode or decode the data and take the CRC of the resulting shards
+  virtual bool get_ec_supports_crc_encode_decode() const = 0;
+
+  // Returns the stripe_info_t used by the PG in EC
+  virtual ECUtil::stripe_info_t get_ec_sinfo() const = 0;
 };
 
 // defining a specific subset of performance counters. Each of the members
@@ -304,6 +326,8 @@ struct ScrubCounterSet {
   osd_counter_idx_t successful_elapsed; ///< time to complete a successful scrub
   osd_counter_idx_t failed_cnt; ///< failed scrubs count
   osd_counter_idx_t failed_elapsed; ///< time from start to failure
+  osd_counter_idx_t write_intersects; ///< client write op intersects chunk range
+  osd_counter_idx_t write_blocked; ///< write op did not preempt the scrub
   // reservation process related:
   osd_counter_idx_t rsv_successful_cnt; ///< completed reservation processes
   osd_counter_idx_t rsv_successful_elapsed; ///< time to all-reserved
@@ -457,6 +481,10 @@ struct ScrubPgIF {
   virtual void on_operator_forced_scrub(
     ceph::Formatter* f,
     scrub_level_t scrub_level) = 0;
+
+  /// abort an ongoing scrub, and cancel any pending operator scrub request
+  virtual void on_operator_abort_scrub(
+    ceph::Formatter* f) = 0;
 
   virtual void dump_scrubber(ceph::Formatter* f) const = 0;
 

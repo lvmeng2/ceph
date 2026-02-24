@@ -1,9 +1,10 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
 #include "crimson/common/operation.h"
+#include "crimson/net/Connection.h"
 #include "crimson/osd/pg_interval_interrupt_condition.h"
 #include "crimson/osd/scheduler/scheduler.h"
 #include "osd/osd_types.h"
@@ -89,6 +90,7 @@ enum class OperationTypeCode {
   pg_advance_map,
   pg_creation,
   replicated_request,
+  replicated_request_reply,
   background_recovery,
   background_recovery_sub,
   internal_client_request,
@@ -113,6 +115,7 @@ static constexpr const char* const OP_NAMES[] = {
   "pg_advance_map",
   "pg_creation",
   "replicated_request",
+  "replicated_request_reply",
   "background_recovery",
   "background_recovery_sub",
   "internal_client_request",
@@ -163,6 +166,61 @@ struct OperationT : InterruptibleOperation {
 
 private:
   virtual void dump_detail(ceph::Formatter *f) const = 0;
+};
+
+class RemoteOperation {
+  crimson::net::ConnectionRef l_conn;
+  crimson::net::ConnectionXcoreRef r_conn;
+
+public:
+  RemoteOperation(crimson::net::ConnectionRef &&conn)
+    : l_conn(std::move(conn)) {}
+
+  crimson::net::Connection &get_local_connection() {
+    assert(l_conn);
+    assert(!r_conn);
+    return *l_conn;
+  };
+
+  crimson::net::Connection &get_foreign_connection() {
+    assert(r_conn);
+    assert(!l_conn);
+    return *r_conn;
+  };
+
+  crimson::net::ConnectionFFRef prepare_remote_submission() {
+    assert(l_conn);
+    assert(!r_conn);
+    auto ret = seastar::make_foreign(std::move(l_conn));
+    l_conn.reset();
+    return ret;
+  }
+
+  void finish_remote_submission(crimson::net::ConnectionFFRef conn) {
+    assert(conn);
+    assert(!l_conn);
+    assert(!r_conn);
+    r_conn = make_local_shared_foreign(std::move(conn));
+  }
+
+  crimson::net::Connection &get_connection() const {
+    if (l_conn) {
+      return *l_conn;
+    } else {
+      assert(r_conn);
+      return *r_conn;
+    }
+  }
+
+  /**
+   * get_remote_connection
+   *
+   * Return a reference to the remote connection to allow caller to
+   * perform a copy only as needed.
+   */
+  crimson::net::ConnectionXcoreRef &get_remote_connection() {
+    return r_conn;
+  }
 };
 
 template <class T>
@@ -302,6 +360,8 @@ class OperationThrottler : public BlockerT<OperationThrottler>,
 
 public:
   OperationThrottler(ConfigProxy &conf);
+  void start();
+  seastar::future<> stop();
 
   std::vector<std::string> get_tracked_keys() const noexcept final;
   void handle_conf_change(const ConfigProxy& conf,
@@ -336,6 +396,7 @@ public:
     });
   }
 
+  void initialize_scheduler(CephContext* cct, ConfigProxy &conf, bool is_rotational, int whoami);
 private:
   void dump_detail(Formatter *f) const final;
 
@@ -345,13 +406,21 @@ private:
   uint64_t in_progress = 0;
 
   uint64_t pending = 0;
+  bool started = false;
+  bool stopped = false;
+
+  seastar::condition_variable cv;
+  std::optional<seastar::future<>> bg_future;
 
   void wake();
+
+  seastar::future<> wake_set();
 
   seastar::future<> acquire_throttle(
     crimson::osd::scheduler::params_t params);
 
   void release_throttle();
+  seastar::future<> background_task();
 };
 
 }

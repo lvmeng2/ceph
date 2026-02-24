@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
@@ -43,42 +43,6 @@ constexpr size_t INTERNAL_NODE_CAPACITY = 254;
 constexpr size_t LEAF_NODE_CAPACITY = 193;
 
 using BackrefNode = FixedKVNode<paddr_t>;
-
-struct backref_map_val_t {
-  extent_len_t len = 0;	///< length of extents
-  laddr_t laddr = L_ADDR_MIN; ///< logical address of extents
-  extent_types_t type = extent_types_t::ROOT;
-
-  backref_map_val_t() = default;
-  backref_map_val_t(
-    extent_len_t len,
-    laddr_t laddr,
-    extent_types_t type)
-    : len(len), laddr(laddr), type(type) {}
-
-  bool operator==(const backref_map_val_t& rhs) const noexcept {
-    return len == rhs.len && laddr == rhs.laddr;
-  }
-};
-
-std::ostream& operator<<(std::ostream &out, const backref_map_val_t& val);
-
-struct __attribute__((packed)) backref_map_val_le_t {
-  extent_len_le_t len = init_extent_len_le(0);
-  laddr_le_t laddr = laddr_le_t(L_ADDR_MIN);
-  extent_types_le_t type = 0;
-
-  backref_map_val_le_t() = default;
-  backref_map_val_le_t(const backref_map_val_le_t &) = default;
-  explicit backref_map_val_le_t(const backref_map_val_t &val)
-    : len(init_extent_len_le(val.len)),
-      laddr(val.laddr),
-      type(extent_types_le_t(val.type)) {}
-
-  operator backref_map_val_t() const {
-    return backref_map_val_t{len, laddr, (extent_types_t)type};
-  }
-};
 
 class BackrefInternalNode
   : public FixedKVInternalNode<
@@ -173,7 +137,7 @@ public:
     Transaction &t,
     BackrefLeafNode &left,
     BackrefLeafNode &right,
-    bool prefer_left,
+    uint32_t pivot_idx,
     BackrefLeafNode &replacement_left,
     BackrefLeafNode &replacement_right) final {}
 
@@ -191,7 +155,7 @@ public:
     Transaction &t,
     BackrefLeafNode &left,
     BackrefLeafNode &right,
-    bool prefer_left,
+    uint32_t pivot_idx,
     BackrefLeafNode &replacement_left,
     BackrefLeafNode &replacement_right) final {}
   // backref leaf nodes don't have to resolve relative addresses

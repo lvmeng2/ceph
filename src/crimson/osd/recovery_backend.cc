@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include <fmt/format.h>
 
@@ -15,6 +15,8 @@
 #include "osd/osd_types.h"
 
 SET_SUBSYS(osd);
+
+namespace crimson::osd {
 
 hobject_t RecoveryBackend::get_temp_recovery_object(
   const hobject_t& target,
@@ -53,15 +55,12 @@ void RecoveryBackend::clean_up(ceph::os::Transaction& t,
   replica_push_targets.clear();
 
   for (auto& [soid, recovery_waiter] : recovering) {
-    if ((recovery_waiter->pull_info
-         && recovery_waiter->pull_info->is_complete())
-	|| (!recovery_waiter->pull_info
-	  && recovery_waiter->obc && recovery_waiter->obc->obs.exists)) {
+    if (recovery_waiter->obc) {
       recovery_waiter->obc->interrupt(
 	  ::crimson::common::actingset_changed(
 	      pg.is_primary()));
-      recovery_waiter->interrupt(why);
     }
+    recovery_waiter->interrupt(why);
   }
   recovering.clear();
 }
@@ -91,7 +90,7 @@ void RecoveryBackend::WaitForObjectRecovery::interrupt(interrupt_cause_t why) {
     pushes.clear();
     break;
   default:
-    ceph_abort("impossible");
+    ceph_abort_msg("impossible");
     break;
   }
 }
@@ -238,12 +237,25 @@ RecoveryBackend::scan_for_backfill_primary(
     seastar::coroutine::lambda([FNAME, this, version_map, backfill_targets]
     (const hobject_t& object) -> interruptible_future<> {
     DEBUGDPP("querying obj:{}", pg, object);
-    auto obc_manager = pg.obc_loader.get_obc_manager(object);
-    co_await pg.obc_loader.load_and_lock(
+    auto obc_manager = pg.obc_loader.get_obc_manager(
+      object, /* resolve_clone = */ false);
+
+    auto found = co_await pg.obc_loader.load_and_lock(
       obc_manager, RWState::RWREAD
-    ).handle_error_interruptible(
-      crimson::ct_error::assert_all("unexpected error")
+    ).si_then([] {
+      return true;
+    }).handle_error_interruptible(
+      crimson::ct_error::enoent::handle([](auto) {
+	return false;
+      }),
+      crimson::ct_error::assert_all(fmt::format("{} {} error when loading obc", pg, FNAME).c_str())
     );
+    if (!found) {
+      // if the object does not exist here, it must have been removed
+      // between the collection_list_partial and here.  This can happen
+      // for the first item in the range, which is usually last_backfill.
+      co_return;
+    }
 
     if (obc_manager.get_obc()->obs.exists) {
       auto version = obc_manager.get_obc()->obs.oi.version;
@@ -255,8 +267,9 @@ RecoveryBackend::scan_for_backfill_primary(
 	bool added_default = false;
 	for (auto & shard: backfill_targets) {
 	  if (shard_versions.contains(shard.shard)) {
-	    version = shard_versions.at(shard.shard);
-	    version_map->emplace(object, std::make_pair(shard.shard, version));
+	    auto shard_version = shard_versions.at(shard.shard);
+	    version_map->emplace(object, std::make_pair(shard.shard,
+							shard_version));
 	  } else if (!added_default) {
 	    version_map->emplace(object, std::make_pair(shard_id_t::NO_SHARD,
 							version));
@@ -445,4 +458,6 @@ RecoveryBackend::handle_backfill_op(
 	std::invalid_argument(fmt::format("invalid request type: {}",
 					  (uint16_t)m->get_header().type)));
   }
+}
+
 }

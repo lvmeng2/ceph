@@ -113,7 +113,7 @@ export class CdValidators {
    *   if the validation check fails, otherwise `null`.
    */
   static pemCert(): ValidatorFn {
-    return Validators.pattern(/^-----BEGIN .+-----$.+^-----END .+-----$/ms);
+    return Validators.pattern(/^-----BEGIN .+-----$\s[\s\S]+^-----END .+-----$/m);
   }
 
   /**
@@ -669,7 +669,8 @@ export class CdValidators {
   }
 
   static oauthAddressTest(): ValidatorFn {
-    const OAUTH2_HTTPS_ADDRESS_PATTERN = /^((\d{1,3}\.){3}\d{1,3}|([a-zA-Z0-9-_]+\.)*[a-zA-Z0-9-_]+)/;
+    // Pattern matches: IPv4 addresses or hostnames (with or without dots, like 'localhost')
+    const OAUTH2_HTTPS_ADDRESS_PATTERN = /^((\d{1,3}\.){3}\d{1,3}|([a-zA-Z0-9-_]+\.)*[a-zA-Z0-9-_]+)$/;
     return (control: AbstractControl): Record<string, boolean> | null => {
       if (!control.value) {
         return null;
@@ -681,7 +682,7 @@ export class CdValidators {
       const [address, port] = control.value.split(':');
       const addressTest = OAUTH2_HTTPS_ADDRESS_PATTERN.test(address);
       const portTest = Number(port) >= 0 && Number(port) <= 65535;
-      return { invalidAddress: !(addressTest && portTest) };
+      return addressTest && portTest ? null : { invalidAddress: true };
     };
   }
 
@@ -689,19 +690,34 @@ export class CdValidators {
    * Validator function to validate endpoints, allowing FQDN, IPv4, and IPv6 addresses with ports.
    * Accepts multiple endpoints separated by commas.
    */
+
   static url(control: AbstractControl): ValidationErrors | null {
+    return CdValidators.urlInternal(control, true);
+  }
+
+  static urlWithProtocolOption(require_protocol: boolean) {
+    return (control: AbstractControl): ValidationErrors | null =>
+      CdValidators.urlInternal(control, require_protocol);
+  }
+
+  private static urlInternal(
+    control: AbstractControl,
+    require_protocol: boolean
+  ): ValidationErrors | null {
     const value = control.value;
 
     if (_.isEmpty(value)) {
       return null;
     }
 
-    const urls = value.includes(',') ? value.split(',') : [value];
+    const urls = value.includes(',')
+      ? value.split(',').map((v: string) => v.trim())
+      : [value.trim()];
 
     const invalidUrls = urls.filter(
       (url: string) =>
         !validator.isURL(url, {
-          require_protocol: true,
+          require_protocol: require_protocol,
           allow_underscores: true,
           require_tld: false
         }) && !validator.isIP(url)

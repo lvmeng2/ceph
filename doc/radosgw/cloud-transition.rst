@@ -2,17 +2,18 @@
 Cloud Transition
 ================
 
-This feature enables transitioning S3 objects to a remote cloud service as part
-of `object lifecycle <https://docs.aws.amazon.com/AmazonS3/latest/dev/object-lifecycle-mgmt.html>`_
+This feature makes it possible to transition S3 objects to a remote cloud
+service as part of the `object lifecycle
+<https://docs.aws.amazon.com/AmazonS3/latest/dev/object-lifecycle-mgmt.html>`_
 via :ref:`storage_classes`. The transition is unidirectional: data cannot be
-transitioned back from the remote zone. The goal of this feature is to enable
-data transition to multiple cloud providers. The currently supported cloud
-providers are those that are compatible with AWS (S3).
+transitioned back from the remote zone. The purpose of this feature is to
+enable data transition to multiple cloud providers. Cloud providers compatible
+with AWS (S3) are supported.
 
-A special storage class of tier type ``cloud-s3`` or ``cloud-s3-glacier``
-is used to configure the remote cloud S3 object store service to which
-data is transitioned. These are defined in terms of zonegroup placement
-targets and, unlike regular storage classes, do not need a data pool.
+We use a special storage class of tier type ``cloud-s3`` or
+``cloud-s3-glacier`` to configure the remote cloud S3 object store service to
+which data is transitioned. These classes are defined in terms of zonegroup
+placement targets and, unlike regular storage classes, do not need a data pool.
 
 User credentials for the remote cloud object store service must be
 configured. Note that source ACLs will not be preserved. It is possible
@@ -24,13 +25,14 @@ Cloud Storage Class Tier Type
 
 * ``tier-type`` (string)
 
-The type of remote cloud service that will be used to transition objects.
-The below tier types are supported:
+  The type of remote cloud service that will be used to transition objects.
+  The below tier types are supported:
 
-* ``cloud-s3`` : Regular S3 compatible object store service
+  * ``cloud-s3`` : Regular S3 compatible object store service.
 
-* ``cloud-s3-glacier`` : S3 Glacier or Tape storage services
+  * ``cloud-s3-glacier`` : S3 Glacier or Tape storage services.
 
+.. _radosgw_cloud_tier_configuration:
 
 Cloud Storage Class Tier Configuration
 --------------------------------------
@@ -46,6 +48,7 @@ Cloud Storage Class Tier Configuration
     "acls": [ { "type": <id | email | uri>,
                 "source_id": <source_id>,
                 "dest_id": <dest_id> } ... ],
+    "location_constraint": <location-constraint>,
     "target_path": <target_path>,
     "target_storage_class": <target-storage-class>,
     "multipart_sync_threshold": {object_size},
@@ -59,66 +62,72 @@ Cloud Transition Specific Configurables
 
 * ``access_key`` (string)
 
-The remote cloud S3 access key.
+  The remote cloud S3 access key.
 
 * ``secret`` (string)
 
-The secret key for the remote cloud S3 service.
+  The secret key for the remote cloud S3 service.
 
 * ``endpoint`` (string)
 
-URL of remote cloud S3 service.
+  URL of remote cloud S3 service.
 
 * ``region`` (string)
 
-The remote cloud S3 service region name.
+  The remote cloud S3 service region name.
 
 * ``host_style`` (path | virtual)
 
-Type of host style to be used when accessing the remote cloud S3 service (default: ``path``).
+  Type of host style to be used when accessing the remote cloud S3 service
+  (default: ``path``).
 
 * ``acls`` (array)
 
-Contains a list of ``acl_mappings``.
+  Contains a list of ``acl_mappings``.
 
 * ``acl_mapping`` (container)
 
-Each ``acl_mapping`` structure contains ``type``, ``source_id``, and ``dest_id``. These
-define the ACL mutation to be done on each object. An ACL mutation makes it possible to
-convert a source userid to a destination userid.
+  Each ``acl_mapping`` structure contains ``type``, ``source_id``, and
+  ``dest_id``. These define the ACL mutation to be done on each object. An ACL
+  mutation makes it possible to convert a source userid to a destination
+  userid.
 
 * ``type`` (id | email | uri)
 
-ACL type: ``id`` defines userid, ``email`` defines user by email,
-and ``uri`` defines user by ``uri`` (group).
+  ACL type: ``id`` defines userid, ``email`` defines user by email,
+  and ``uri`` defines user by ``uri`` (group).
 
 * ``source_id`` (string)
 
-ID of user in the source zone.
+  ID of user in the source zone.
 
 * ``dest_id`` (string)
 
-ID of user on the destination.
+  ID of user on the destination.
 
 * ``target_path`` (string)
 
-A string that defines how the target path is constructed. The target path
-specifies a prefix to which the source bucket-name/object-name is appended.
-If not specified the ``target_path`` created is ``rgwx-${zonegroup}-${storage-class}-cloud-bucket``.
+  A string that defines how the target path is constructed. The target path
+  specifies a prefix to which the source bucket-name/object-name is appended.
+  If not specified the ``target_path`` created is ``rgwx-${zonegroup}-${storage-class}-cloud-bucket``.
 
-For example: ``target_path = rgwx-archive-${zonegroup}/``
+  For example: ``target_path = rgwx-archive-${zonegroup}/``
+
+* ``location_constraint`` (string)
+
+  Specifies the region where the target bucket will be created on the remote S3 endpoint. For AWS, this location needs to be specified only if the region is other than US East (us-east-1).
 
 * ``target_storage_class`` (string)
 
-A string that defines the target storage class to which the object transitions.
-If not specified, the object is transitioned to the ``STANDARD`` storage class.
+  A string that defines the target storage class to which the object transitions.
+  If not specified, the object is transitioned to the ``STANDARD`` storage class.
 
 * ``retain_head_object`` (true | false)
 
-If ``true``, the metadata of the object transitioned to the cloud service is retained.
-If ``false`` (default), the object is deleted after the transition.
-This option is ignored for current-versioned objects. For more details,
-refer to the "Versioned Objects" section below.
+  If ``true``, the metadata of the object transitioned to the cloud service is retained.
+  If ``false`` (default), the object is deleted after the transition.
+  This option is ignored for current-versioned objects. For more details,
+  refer to the :ref:`versioned_objects` section below.
 
 
 S3 Specific Configurables
@@ -135,19 +144,19 @@ when accessing cloud services::
 
 * ``multipart_sync_threshold`` (integer)
 
-Objects this size or larger will be transitioned to the cloud using multipart upload.
+  Objects this size or larger will be transitioned to the cloud using multipart upload.
 
 * ``multipart_min_part_size`` (integer)
 
-Minimum part size to use when transitioning objects using multipart upload.
+  Minimum part size to use when transitioning objects using multipart upload.
 
 
 How to Configure
 ~~~~~~~~~~~~~~~~
 
-See :ref:`adding_a_storage_class` for how to configure storage-class for a zonegroup. The cloud transition requires a creation of a special storage class with tier type defined as ``cloud-s3`` or ``cloud-s3-glacier``
+See :ref:`adding_a_storage_class` for how to configure storage-class for a zonegroup. The cloud transition requires a creation of a special storage class with tier type defined as ``cloud-s3`` or ``cloud-s3-glacier``.
 
-.. note:: If you have not performed previous `Multisite Configuration`_,
+.. note:: If you have not performed previous :ref:`Multisite Configuration <multisite>`,
           a ``default`` zone and zonegroup are created for you, and changes
           to the zone/zonegroup will not take effect until the Ceph Object
           Gateways (RGW daemons) are restarted. If you have created a realm for multisite,
@@ -193,6 +202,7 @@ For example
                               "access_key": "",
                               "secret": "",
                               "host_style": "path",
+                              "location_constraint": "";
                               "target_storage_class": "",
                               "target_path": "",
                               "acl_mappings": [],
@@ -352,9 +362,10 @@ attributes are added to the objects being transitioned:
 * ``x-rgw-cloud-keep-attrs`` : ``true`` / ``false``
 
    If set to default ``true``, the cloud service should map and store all
-   ``the x-amz-meta-*`` attributes. If it cannot, then the operation should fail.
-    if set to ``false``, the cloud service can ignore such attributes and
-    just store the object data being sent.
+   the ``x-amz-meta-*`` attributes. If it cannot, then the operation should fail.
+
+   If set to ``false``, the cloud service can ignore such attributes and
+   just store the object data being sent.
 
 By default, post-transition, the source object gets deleted. But it is possible
 to retain its metadata with updated values (including ``storage-class``
@@ -401,6 +412,7 @@ Below is the object name format::
 
   s3://<target_path>/<source_bucket_name>/<source_object_name>(-<source_object_version_id>)
 
+.. _versioned_objects:
 
 Versioned Objects
 ~~~~~~~~~~~~~~~~~
@@ -414,17 +426,13 @@ For versioned and locked objects, similar semantics as that of LifecycleExpirati
 
 Restoring Objects
 -----------------
-The objects transitioned to cloud can now be restored. For more information, refer to 
-`Restoring Objects from Cloud <https://docs.aws.amazon.com/AmazonS3/latest/dev/cloud-restore.html>`_.
+The objects transitioned to cloud can now be restored. For more information, refer to
+:ref:`Restoring Objects from Cloud <radosgw-cloud-restore>`.
 
 
 Future Work
 -----------
 
-* Send presigned redirect or read-through the objects transitioned to cloud
-
-* Support s3:RestoreObject operation on cloud transitioned objects.
+* Send presigned redirect or read-through the objects transitioned to cloud.
 
 * Support transition to other cloud providers (like Azure).
-
-.. _`Multisite Configuration`: ../multisite

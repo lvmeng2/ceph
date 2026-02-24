@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #include "logmissing_request.h"
 
@@ -17,7 +17,7 @@ namespace crimson::osd {
 
 PGPCTRequest::PGPCTRequest(crimson::net::ConnectionRef&& conn,
 		       Ref<MOSDPGPCT> &&req)
-  : l_conn{std::move(conn)},
+  : RemoteOperation{std::move(conn)},
     req{std::move(req)}
 {}
 

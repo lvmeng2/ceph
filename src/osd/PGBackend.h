@@ -1,5 +1,6 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
+
 /*
  * Ceph - scalable distributed file system
  *
@@ -293,7 +294,7 @@ typedef std::shared_ptr<const OSDMap> OSDMapRef;
      virtual void send_message_osd_cluster(
        Message *m, const ConnectionRef& con) = 0;
      virtual void start_mon_command(
-       const std::vector<std::string>& cmd, const bufferlist& inbl,
+       std::vector<std::string>&& cmd, bufferlist&& inbl,
        bufferlist *outbl, std::string *outs,
        Context *onfinish) = 0;
      virtual ConnectionRef get_con_osd_cluster(int peer, epoch_t from_epoch) = 0;
@@ -428,8 +429,24 @@ typedef std::shared_ptr<const OSDMap> OSDMapRef;
    virtual IsPGReadablePredicate *get_is_readable_predicate() const = 0;
    virtual unsigned int get_ec_data_chunk_count() const { return 0; };
    virtual int get_ec_stripe_chunk_size() const { return 0; };
+   virtual bool get_ec_supports_crc_encode_decode() const = 0;
    virtual uint64_t object_size_to_shard_size(const uint64_t size, shard_id_t shard) const { return size; };
    virtual void dump_recovery_info(ceph::Formatter *f) const = 0;
+   virtual bool get_is_nonprimary_shard(shard_id_t shard) const {
+     return false; // Only EC has nonprimary shards.
+   };
+   virtual bool get_is_hinfo_required() const {
+     return false; // Only EC can have hinfo.
+   }
+   virtual bool get_is_ec_optimized() const {
+     return false; // Only EC can have be ec optimized!
+   }
+   virtual bool ec_can_decode(const shard_id_set &available_shards) const = 0;
+   virtual shard_id_map<bufferlist> ec_encode_acting_set(
+       const bufferlist &in_bl) const = 0;
+   virtual shard_id_map<bufferlist> ec_decode_acting_set(
+       const shard_id_map<bufferlist> &shard_map, int chunk_size) const = 0;
+   virtual ECUtil::stripe_info_t ec_get_sinfo() const = 0;
 
  private:
    std::set<hobject_t> temp_contents;
@@ -495,6 +512,7 @@ typedef std::shared_ptr<const OSDMap> OSDMapRef;
 
    void partial_write(
      pg_info_t *info,
+     eversion_t previous_version,
      const pg_log_entry_t &entry);
 
    void remove(
@@ -592,6 +610,11 @@ typedef std::shared_ptr<const OSDMap> OSDMapRef;
      return -EOPNOTSUPP;
    }
 
+   virtual std::pair<uint64_t, uint64_t> extent_to_shard_extent(
+       uint64_t off, uint64_t len) {
+     return std::pair(off, len);
+   }
+
    virtual void objects_read_async(
      const hobject_t &hoid,
      uint64_t object_size,
@@ -607,7 +630,8 @@ typedef std::shared_ptr<const OSDMap> OSDMapRef;
      ScrubMapBuilder &pos);
 
    virtual uint64_t be_get_ondisk_size(uint64_t logical_size,
-                                       shard_id_t shard_id) const = 0;
+                                       shard_id_t shard_id,
+                                       bool object_is_legacy_ec) const = 0;
 
    virtual int be_deep_scrub(
      [[maybe_unused]] const Scrub::ScrubCounterSet& io_counters,

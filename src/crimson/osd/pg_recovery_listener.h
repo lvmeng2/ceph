@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 #pragma once
 
@@ -10,10 +10,8 @@
 #include "osd/osd_types.h"
 
 namespace crimson::osd {
-  class ShardServices;
-  class PglogBasedRecovery;
-};
-
+class ShardServices;
+class PglogBasedRecovery;
 class RecoveryBackend;
 class PGRecovery;
 
@@ -43,4 +41,7 @@ public:
   virtual void set_pglog_based_recovery_op(
     crimson::osd::PglogBasedRecovery *op) = 0;
   virtual void reset_pglog_based_recovery_op() = 0;
+  virtual void schedule_event_after(PGPeeringEventRef evt, float delay) = 0;
 };
+
+}

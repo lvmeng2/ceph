@@ -18,7 +18,8 @@ const BASE_URL = 'block/nvmeof/subsystems';
 @Component({
   selector: 'cd-nvmeof-initiators-list',
   templateUrl: './nvmeof-initiators-list.component.html',
-  styleUrls: ['./nvmeof-initiators-list.component.scss']
+  styleUrls: ['./nvmeof-initiators-list.component.scss'],
+  standalone: false
 })
 export class NvmeofInitiatorsListComponent implements OnInit {
   @Input()
@@ -116,7 +117,7 @@ export class NvmeofInitiatorsListComponent implements OnInit {
             nqn: this.subsystemNQN,
             plural: itemNames.length > 1
           }),
-          call: this.nvmeofService.removeInitiators(this.subsystemNQN, {
+          call: this.nvmeofService.removeSubsystemInitiators(this.subsystemNQN, {
             host_nqn,
             gw_group: this.group
           })

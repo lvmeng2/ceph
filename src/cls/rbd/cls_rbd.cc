@@ -1,5 +1,5 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:nil -*-
+// vim: ts=8 sw=2 sts=2 expandtab
 
 /** \file
  *
@@ -5073,7 +5073,8 @@ int image_status_set(cls_method_context_t hctx, const string &global_image_id,
   if (r < 0) {
     return 0;
   }
-  if (mirror_image.state != cls::rbd::MIRROR_IMAGE_STATE_ENABLED) {
+  if (mirror_image.state != cls::rbd::MIRROR_IMAGE_STATE_ENABLED &&
+      mirror_image.state != cls::rbd::MIRROR_IMAGE_STATE_CREATING) {
     return 0;
   }
 

@@ -40,7 +40,6 @@ import { RbdTrashRestoreModalComponent } from './rbd-trash-restore-modal/rbd-tra
 import { NvmeofGatewayComponent } from './nvmeof-gateway/nvmeof-gateway.component';
 import { NvmeofSubsystemsComponent } from './nvmeof-subsystems/nvmeof-subsystems.component';
 import { NvmeofSubsystemsDetailsComponent } from './nvmeof-subsystems-details/nvmeof-subsystems-details.component';
-import { NvmeofTabsComponent } from './nvmeof-tabs/nvmeof-tabs.component';
 import { NvmeofSubsystemsFormComponent } from './nvmeof-subsystems-form/nvmeof-subsystems-form.component';
 import { NvmeofListenersFormComponent } from './nvmeof-listeners-form/nvmeof-listeners-form.component';
 import { NvmeofListenersListComponent } from './nvmeof-listeners-list/nvmeof-listeners-list.component';
@@ -48,6 +47,12 @@ import { NvmeofNamespacesListComponent } from './nvmeof-namespaces-list/nvmeof-n
 import { NvmeofNamespacesFormComponent } from './nvmeof-namespaces-form/nvmeof-namespaces-form.component';
 import { NvmeofInitiatorsListComponent } from './nvmeof-initiators-list/nvmeof-initiators-list.component';
 import { NvmeofInitiatorsFormComponent } from './nvmeof-initiators-form/nvmeof-initiators-form.component';
+import { NvmeofGatewayGroupComponent } from './nvmeof-gateway-group/nvmeof-gateway-group.component';
+import { NvmeofSubsystemsStepOneComponent } from './nvmeof-subsystems-form/nvmeof-subsystem-step-1/nvmeof-subsystem-step-1.component';
+import { NvmeofSubsystemsStepThreeComponent } from './nvmeof-subsystems-form/nvmeof-subsystem-step-3/nvmeof-subsystem-step-3.component';
+import { NvmeofSubsystemsStepTwoComponent } from './nvmeof-subsystems-form/nvmeof-subsystem-step-2/nvmeof-subsystem-step-2.component';
+import { NvmeofGatewayNodeComponent } from './nvmeof-gateway-node/nvmeof-gateway-node.component';
+import { NvmeofGroupFormComponent } from './nvmeof-group-form/nvmeof-group-form.component';
 
 import {
   ButtonModule,
@@ -64,15 +69,29 @@ import {
   SelectModule,
   UIShellModule,
   TreeviewModule,
-  TabsModule
+  SideNavModule,
+  TabsModule,
+  TagModule,
+  LayoutModule,
+  ContainedListModule,
+  LayerModule,
+  ThemeModule
 } from 'carbon-components-angular';
 
 // Icons
 import ChevronDown from '@carbon/icons/es/chevron--down/16';
 import Close from '@carbon/icons/es/close/32';
-import AddFilled from '@carbon/icons/es/add--filled/32';
+import AddFilled from '@carbon/icons/es/add--filled/20';
 import SubtractFilled from '@carbon/icons/es/subtract--filled/32';
 import Reset from '@carbon/icons/es/reset/32';
+import SubtractAlt from '@carbon/icons/es/subtract--alt/20';
+import ProgressBarRound from '@carbon/icons/es/progress-bar--round/32';
+import Search from '@carbon/icons/es/search/32';
+import { NvmeofGatewaySubsystemComponent } from './nvmeof-gateway-subsystem/nvmeof-gateway-subsystem.component';
+import { NvmeGatewayViewComponent } from './nvme-gateway-view/nvme-gateway-view.component';
+import { NvmeGatewayViewBreadcrumbResolver } from './nvme-gateway-view/nvme-gateway-view-breadcrumb.resolver';
+import { NvmeofGatewayNodeMode } from '~/app/shared/enum/nvmeof.enum';
+import { NvmeofGatewayNodeAddModalComponent } from './nvmeof-gateway-node/nvmeof-gateway-node-add-modal/nvmeof-gateway-node-add-modal.component';
 
 @NgModule({
   imports: [
@@ -89,8 +108,8 @@ import Reset from '@carbon/icons/es/reset/32';
     TreeviewModule,
     UIShellModule,
     InputModule,
-    GridModule,
     ButtonModule,
+    GridModule,
     IconModule,
     CheckboxModule,
     RadioModule,
@@ -99,7 +118,15 @@ import Reset from '@carbon/icons/es/reset/32';
     ModalModule,
     DatePickerModule,
     ComboBoxModule,
-    TabsModule
+    TabsModule,
+    TagModule,
+    GridModule,
+    LayerModule,
+    LayoutModule,
+    ContainedListModule,
+    SideNavModule,
+    ThemeModule,
+    LayoutModule
   ],
   declarations: [
     RbdListComponent,
@@ -129,20 +156,38 @@ import Reset from '@carbon/icons/es/reset/32';
     NvmeofGatewayComponent,
     NvmeofSubsystemsComponent,
     NvmeofSubsystemsDetailsComponent,
-    NvmeofTabsComponent,
+    NvmeofGatewayGroupComponent,
     NvmeofSubsystemsFormComponent,
     NvmeofListenersFormComponent,
     NvmeofListenersListComponent,
     NvmeofNamespacesListComponent,
     NvmeofNamespacesFormComponent,
     NvmeofInitiatorsListComponent,
-    NvmeofInitiatorsFormComponent
+    NvmeofInitiatorsFormComponent,
+    NvmeofGatewayNodeComponent,
+    NvmeofGroupFormComponent,
+    NvmeofSubsystemsStepOneComponent,
+    NvmeofSubsystemsStepTwoComponent,
+    NvmeofSubsystemsStepThreeComponent,
+    NvmeGatewayViewComponent,
+    NvmeofGatewaySubsystemComponent,
+    NvmeofGatewayNodeAddModalComponent
   ],
+
   exports: [RbdConfigurationListComponent, RbdConfigurationFormComponent]
 })
 export class BlockModule {
   constructor(private iconService: IconService) {
-    this.iconService.registerAll([ChevronDown, Close, AddFilled, SubtractFilled, Reset]);
+    this.iconService.registerAll([
+      ChevronDown,
+      Close,
+      AddFilled,
+      SubtractFilled,
+      Reset,
+      ProgressBarRound,
+      SubtractAlt,
+      Search
+    ]);
   }
 }
 
@@ -281,7 +326,32 @@ const routes: Routes = [
       }
     },
     children: [
-      { path: '', redirectTo: 'subsystems', pathMatch: 'full' },
+      { path: '', redirectTo: 'gateways', pathMatch: 'full' },
+      { path: 'gateways', component: NvmeofGatewayComponent, data: { breadcrumbs: 'Gateways' } },
+      {
+        path: `gateways/${URLVerbs.CREATE}`,
+        component: NvmeofGroupFormComponent,
+        data: { breadcrumbs: `${ActionLabels.CREATE}${URLVerbs.GATEWAY_GROUP}` }
+      },
+
+      {
+        path: `gateways/${URLVerbs.VIEW}/:group`,
+        component: NvmeGatewayViewComponent,
+        data: { breadcrumbs: NvmeGatewayViewBreadcrumbResolver }, // Use resolver here
+        children: [
+          { path: '', redirectTo: 'nodes', pathMatch: 'full' },
+          {
+            path: 'nodes',
+            component: NvmeofGatewayNodeComponent,
+            data: { breadcrumbs: $localize`Gateway nodes`, mode: NvmeofGatewayNodeMode.DETAILS }
+          },
+          {
+            path: 'subsystems',
+            component: NvmeofGatewaySubsystemComponent,
+            data: { breadcrumbs: $localize`Subsystems` }
+          }
+        ]
+      },
       {
         path: 'subsystems',
         component: NvmeofSubsystemsComponent,
@@ -318,8 +388,7 @@ const routes: Routes = [
             outlet: 'modal'
           }
         ]
-      },
-      { path: 'gateways', component: NvmeofGatewayComponent, data: { breadcrumbs: 'Gateways' } }
+      }
     ]
   }
 ];

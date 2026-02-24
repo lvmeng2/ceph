@@ -12,12 +12,16 @@ import { FinishedTask } from '~/app/shared/models/finished-task';
 import { ActivatedRoute, Router } from '@angular/router';
 import { InitiatorRequest, NvmeofService } from '~/app/shared/api/nvmeof.service';
 
+import { Icons } from '~/app/shared/enum/icons.enum';
+
 @Component({
   selector: 'cd-nvmeof-initiators-form',
   templateUrl: './nvmeof-initiators-form.component.html',
-  styleUrls: ['./nvmeof-initiators-form.component.scss']
+  styleUrls: ['./nvmeof-initiators-form.component.scss'],
+  standalone: false
 })
 export class NvmeofInitiatorsFormComponent implements OnInit {
+  icons = Icons;
   permission: Permission;
   initiatorForm: CdFormGroup;
   action: string;
@@ -126,7 +130,7 @@ export class NvmeofInitiatorsFormComponent implements OnInit {
         task: new FinishedTask(taskUrl, {
           nqn: this.subsystemNQN
         }),
-        call: this.nvmeofService.addInitiators(this.subsystemNQN, request)
+        call: this.nvmeofService.addSubsystemInitiators(this.subsystemNQN, request)
       })
       .subscribe({
         error() {
